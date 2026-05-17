@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Pixel Art & Animation Editor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Left Sidebar Toolbar -->
+        <aside class="sidebar">
+            <h1 class="logo">Pixeledit</h1>
+            
+            <!-- Core Tools -->
+            <div class="tool-section">
+                <h3>Tools</h3>
+                <div class="tool-grid">
+                    <button id="btn-pencil" class="tool-btn active" title="Pencil (P)">✏️</button>
+                    <button id="btn-eraser" class="tool-btn" title="Eraser (E)">🧽</button>
+                    <button id="btn-bucket" class="tool-btn" title="Fill Bucket (F)">🪣</button>
+                    <button id="btn-line" class="tool-btn" title="Line Tool (L)">📏</button>
+                    <button id="btn-rect" class="tool-btn" title="Rectangle Tool (R)">⬜</button>
+                    <button id="btn-oval" class="tool-btn" title="Oval Tool (O)">⭕</button>
+                    <button id="btn-clear" class="tool-btn" title="Clear Active Layer">🗑️</button>
+                </div>
+            </div>
+
+            <!-- Brush Setup -->
+            <div class="tool-section">
+                <h3>Brush Size</h3>
+                <select id="brush-size">
+                    <option value="1" selected>1px (Thin)</option>
+                    <option value="2">2px</option>
+                    <option value="3">3px</option>
+                    <option value="4">4px (Thick)</option>
+                </select>
+            </div>
+
+            <!-- Layer Manager -->
+            <div class="tool-section">
+                <h3>Layers</h3>
+                <div class="layer-controls">
+                    <button id="btn-add-layer" title="New Layer">➕ Add Layer</button>
+                    <button id="btn-delete-layer" title="Delete Active Layer">❌ Delete</button>
+                </div>
+                <div class="layer-list" id="layer-list">
+                    <!-- Populated dynamically by JS -->
+                </div>
+            </div>
+
+            <!-- Color Palette Panel -->
+            <div class="tool-section">
+                <h3>Colors</h3>
+                <input type="color" id="color-picker" value="#000000">
+                <div class="palette" id="palette">
+                    <div class="color-swatch active" style="background-color: #000000;"></div>
+                    <div class="color-swatch" style="background-color: #ffffff;"></div>
+                    <div class="color-swatch" style="background-color: #d95763;"></div>
+                    <div class="color-swatch" style="background-color: #99e550;"></div>
+                    <div class="color-swatch" style="background-color: #5b6ee1;"></div>
+                    <div class="color-swatch" style="background-color: #fbf236;"></div>
+                    <div class="color-swatch" style="background-color: #df7126;"></div>
+                    <div class="color-swatch" style="background-color: #5fcde4;"></div>
+                </div>
+            </div>
+
+            <!-- Image Adjustments FX Panel -->
+            <div class="tool-section adjustment-panel">
+                <h3>FX Adjustments</h3>
+                <div class="slider-group">
+                    <label>Brightness: <span id="val-brightness">100%</span></label>
+                    <input type="range" id="slider-brightness" min="0" max="200" value="100">
+                </div>
+                <div class="slider-group">
+                    <label>Contrast: <span id="val-contrast">100%</span></label>
+                    <input type="range" id="slider-contrast" min="0" max="200" value="100">
+                </div>
+                <div class="slider-group">
+                    <label>Saturation: <span id="val-saturation">100%</span></label>
+                    <input type="range" id="slider-saturation" min="0" max="200" value="100">
+                </div>
+                <div class="slider-group">
+                    <label>Vibrance: <span id="val-vibrance">0%</span></label>
+                    <input type="range" id="slider-vibrance" min="-100" max="100" value="0">
+                </div>
+                <button id="btn-apply-filters" class="apply-btn">✨ Apply to Layer</button>
+            </div>
+
+            <!-- Canvas Settings -->
+            <div class="tool-section">
+                <h3>Settings</h3>
+                <label for="grid-size">Canvas Size:</label>
+                <select id="grid-size">
+                    <option value="16">16 x 16</option>
+                    <option value="32" selected>32 x 32</option>
+                    <option value="64">64 x 64</option>
+                </select>
+                <button id="btn-toggle-grid" class="tool-btn" style="width: 100%; font-size: 14px; margin-bottom: 10px; padding: 8px;">🌐 Hide Grid</button>
+                <button id="btn-export" class="export-btn">💾 Export Current Frame</button>
+            </div>
+        </aside>
+
+        <!-- Main Workspace -->
+        <main class="workspace">
+            <div class="canvas-wrapper" id="canvas-wrapper">
+                <div class="canvas-container">
+                    <div id="onion-canvas" style="display: none;"></div>
+                    <div id="pixel-canvas"></div>
+                </div>
+            </div>
+            
+            <!-- NEW ANIMATION TIMELINE -->
+            <div class="timeline-panel">
+                <div class="timeline-header">
+                    <div class="timeline-controls">
+                        <button id="btn-play" class="tool-btn">▶️ Play</button>
+                        <label>FPS: <input type="number" id="fps-input" value="8" min="1" max="60" style="width: 50px; background: var(--bg-dark); color: white; border: 1px solid var(--border-color);"></label>
+                        <button id="btn-onion" class="tool-btn">🧅 Onion: OFF</button>
+                    </div>
+                    <div class="timeline-controls">
+                        <button id="btn-add-frame" class="tool-btn" style="font-size: 14px;">➕ New Frame</button>
+                        <button id="btn-dup-frame" class="tool-btn" style="font-size: 14px;">📄 Duplicate</button>
+                        <button id="btn-del-frame" class="tool-btn" style="font-size: 14px;">🗑️ Delete</button>
+                        <button id="btn-export-spritesheet" class="export-btn" style="width: auto;">🎞️ Export Spritesheet</button>
+                    </div>
+                </div>
+                <div class="frame-list" id="frame-list">
+                    <!-- Populated dynamically -->
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Hidden native element for compiling clean exports -->
+    <canvas id="export-canvas" style="display: none;"></canvas>
+    <script src="script.js"></script>
+</body>
+</html>

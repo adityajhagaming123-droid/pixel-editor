@@ -1,0 +1,347 @@
+:root {
+    --bg-dark: #2b2b2b;
+    --bg-panel: #363636;
+    --border-color: #1a1a1a;
+    --highlight: #748c94;
+    --text-light: #e0e0e0;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+body {
+    background-color: var(--bg-dark);
+    color: var(--text-light);
+    height: 100vh;
+    display: flex;
+    overflow: hidden;
+}
+
+.app-container {
+    display: flex;
+    width: 100%;
+    height: 100%;
+}
+
+.sidebar {
+    width: 260px;
+    background-color: var(--bg-panel);
+    border-right: 2px solid var(--border-color);
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    z-index: 10;
+    overflow-y: auto;
+}
+
+.logo {
+    font-size: 24px;
+    text-align: center;
+    border-bottom: 2px solid var(--border-color);
+    padding-bottom: 10px;
+    letter-spacing: 2px;
+}
+
+h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    color: #a0a0a0;
+    border-left: 3px solid var(--highlight);
+    padding-left: 5px;
+}
+
+.tool-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+}
+
+.tool-btn {
+    background-color: var(--bg-dark);
+    color: white;
+    border: 2px solid var(--border-color);
+    padding: 8px;
+    font-size: 18px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.tool-btn.active {
+    background-color: var(--highlight);
+    border-color: #fff;
+}
+
+/* Layer UI Elements */
+.layer-controls {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 8px;
+}
+
+.layer-controls button {
+    flex: 1;
+    padding: 6px;
+    background: var(--bg-dark);
+    border: 1px solid var(--border-color);
+    color: white;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.layer-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 150px;
+    overflow-y: auto;
+    background: var(--bg-dark);
+    padding: 4px;
+    border-radius: 4px;
+}
+
+.layer-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px;
+    background: #444;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.layer-item.active {
+    background: var(--highlight);
+    border: 1px solid white;
+}
+
+.layer-item-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.layer-visibility-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: white;
+}
+
+#color-picker {
+    width: 100%;
+    height: 35px;
+    border: none;
+    cursor: pointer;
+    background: none;
+    margin-bottom: 8px;
+}
+
+.palette {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 5px;
+}
+
+.color-swatch {
+    width: 100%;
+    aspect-ratio: 1;
+    border: 2px solid var(--border-color);
+    cursor: pointer;
+    border-radius: 2px;
+}
+
+.color-swatch.active {
+    border-color: white;
+    transform: scale(1.1);
+}
+
+.slider-group {
+    margin-bottom: 8px;
+    font-size: 13px;
+}
+
+.slider-group label {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 2px;
+    color: #ccc;
+}
+
+.slider-group input[type="range"] {
+    width: 100%;
+    accent-color: var(--highlight);
+    cursor: pointer;
+    background: var(--bg-dark);
+}
+
+.apply-btn {
+    width: 100%;
+    padding: 8px;
+    background-color: #2196F3;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    margin-top: 5px;
+}
+
+select {
+    width: 100%;
+    padding: 6px;
+    background: var(--bg-dark);
+    color: white;
+    border: 1px solid var(--border-color);
+    margin-bottom: 5px;
+}
+
+.export-btn {
+    width: 100%;
+    padding: 10px;
+    background-color: #4caf50;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+/* --- Main Workspace & Canvas Layout --- */
+.workspace {
+    flex: 1;
+    height: 100vh;
+    display: flex;
+    flex-direction: column; /* Stack canvas area and timeline */
+    background-color: var(--bg-dark);
+}
+
+.canvas-wrapper {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+    background-image: 
+        linear-gradient(45deg, #1f1f1f 25%, transparent 25%), 
+        linear-gradient(-45deg, #1f1f1f 25%, transparent 25%), 
+        linear-gradient(45deg, transparent 75%, #1f1f1f 75%), 
+        linear-gradient(-45deg, transparent 75%, #1f1f1f 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+}
+
+.canvas-container {
+    position: relative; /* Crucial for overlapping onion skin */
+    background-color: white;
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
+    display: inline-block;
+    transition: transform 0.05s ease-out; 
+    transform-origin: center center;
+}
+
+#pixel-canvas {
+    display: grid;
+    cursor: crosshair;
+    transition: filter 0.1s ease; 
+}
+
+#onion-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: grid;
+    opacity: 0.3; /* Translucent previous frame */
+    pointer-events: none; /* Let clicks pass through to main canvas */
+}
+
+.pixel {
+    width: 15px; 
+    height: 15px;
+    background-color: transparent;
+    border: 1px solid rgba(200, 200, 200, 0.2); 
+    user-select: none;
+}
+
+/* Dynamically added by JS for 64x64 grid */
+.grid-64 .pixel {
+    width: 8px;
+    height: 8px;
+}
+
+/* Hides grid on the main canvas when toggled, and always hides it on the onion skin */
+.hide-grid .pixel,
+#onion-canvas .pixel {
+    border: none !important;
+}
+
+/* --- Timeline Panel --- */
+.timeline-panel {
+    height: 140px;
+    background-color: var(--bg-panel);
+    border-top: 2px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    padding: 10px 15px;
+}
+
+.timeline-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.timeline-controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.timeline-controls label {
+    font-size: 13px;
+    color: #ccc;
+    font-weight: bold;
+}
+
+.frame-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 10px;
+    flex: 1;
+    align-items: center;
+}
+
+.frame-item {
+    min-width: 50px;
+    height: 50px;
+    background-color: #444;
+    border: 2px solid var(--border-color);
+    color: white;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+    font-weight: bold;
+    border-radius: 4px;
+}
+
+.frame-item:hover {
+    background-color: #555;
+}
+
+.frame-item.active {
+    background-color: var(--highlight);
+    border-color: white;
+}
