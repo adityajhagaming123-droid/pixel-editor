@@ -9,6 +9,10 @@ const workspaceWrapper = document.getElementById('canvas-wrapper');
 const canvasContainer = document.querySelector('.canvas-container');
 const layerListContainer = document.getElementById('layer-list');
 
+// Selection Variables
+let selection = null; 
+const marquee = document.getElementById('selection-marquee');
+
 // Slider DOM hooks
 const sBrightness = document.getElementById('slider-brightness');
 const sContrast = document.getElementById('slider-contrast');
@@ -359,18 +363,32 @@ function startDrawing(e) {
     const activeLayer = layers.find(l => l.id === activeLayerId);
     if (!activeLayer || !activeLayer.visible) return; 
 
-    undoStack.push(captureState());
-    if (undoStack.length > MAX_HISTORY) undoStack.shift();
-    redoStack = []; 
-
-    isDrawing = true;
     const index = parseInt(e.target.dataset.index);
     startX = index % gridSize;
     startY = Math.floor(index / gridSize);
     
     lastX = startX;
     lastY = startY;
-    
+
+    // Handle initial selection tracking setup
+    if (currentTool === 'select') {
+        isDrawing = true;
+        selection = { startX: startX, startY: startY, endX: startX, endY: startY };
+        updateMarquee();
+        return; 
+    }
+
+    // Wipe previous selection bounds if using regular brushes
+    if (selection) {
+        selection = null;
+        updateMarquee();
+    }
+
+    undoStack.push(captureState());
+    if (undoStack.length > MAX_HISTORY) undoStack.shift();
+    redoStack = []; 
+
+    isDrawing = true;
     snapshotState = [...activeLayer.data]; 
     applyTool(index);
 }
@@ -378,6 +396,14 @@ function startDrawing(e) {
 function draw(e) {
     if (isDrawing && e.target.classList.contains('pixel')) {
         const index = parseInt(e.target.dataset.index);
+        
+        if (currentTool === 'select') {
+            selection.endX = index % gridSize;
+            selection.endY = Math.floor(index / gridSize);
+            updateMarquee();
+            return;
+        }
+
         applyTool(index);
     }
 }
@@ -390,6 +416,7 @@ function stopDrawing() {
 
 window.addEventListener('mouseup', stopDrawing);
 
+// Touch support implementations
 window.addEventListener('touchstart', (e) => {
     const touch = e.touches[0];
     const target = document.elementFromPoint(touch.clientX, touch.clientY);
@@ -405,7 +432,13 @@ window.addEventListener('touchmove', (e) => {
     const target = document.elementFromPoint(touch.clientX, touch.clientY);
     if (target && target.classList.contains('pixel')) {
         const index = parseInt(target.dataset.index);
-        applyTool(index);
+        if (currentTool === 'select') {
+            selection.endX = index % gridSize;
+            selection.endY = Math.floor(index / gridSize);
+            updateMarquee();
+        } else {
+            applyTool(index);
+        }
     }
 }, { passive: false });
 
@@ -439,6 +472,25 @@ function applyTool(index) {
     }
     
     renderComposition();
+}
+
+function updateMarquee() {
+    if (!selection) {
+        marquee.classList.remove('active');
+        return;
+    }
+    
+    marquee.classList.add('active');
+    const left = Math.min(selection.startX, selection.endX);
+    const top = Math.min(selection.startY, selection.endY);
+    const width = Math.abs(selection.startX - selection.endX) + 1;
+    const height = Math.abs(selection.startY - selection.endY) + 1;
+
+    const pixelSize = canvas.clientWidth / gridSize;
+    marquee.style.left = `${left * pixelSize}px`;
+    marquee.style.top = `${top * pixelSize}px`;
+    marquee.style.width = `${width * pixelSize}px`;
+    marquee.style.height = `${height * pixelSize}px`;
 }
 
 function drawBrush(cx, cy, color, layer) {
@@ -631,6 +683,23 @@ function toggleGrid() {
     }
 }
 
+function setTool(toolName, activeBtn) {
+    currentTool = toolName;
+    toolBtns.forEach(btn => btn.classList.remove('active'));
+    if (activeBtn) activeBtn.classList.add('active');
+
+    // Remove visible marquee states if switching to a non-selection framework
+    if (selection && currentTool !== 'select') {
+        selection = null;
+        updateMarquee();
+    }
+}
+
+function updateActiveSwatch(activeSwatch) {
+    swatches.forEach(swatch => swatch.classList.remove('active'));
+    if (activeSwatch) activeSwatch.classList.add('active');
+}
+
 function setupEventListeners() {
     workspaceWrapper.addEventListener('wheel', function(e) {
         e.preventDefault(); 
@@ -645,10 +714,39 @@ function setupEventListeners() {
             if (e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
         } else {
             if (e.key.toLowerCase() === 'g') toggleGrid();
+            
+            // Delete key selection clear processing 
+            if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
+                const activeLayer = layers.find(l => l.id === activeLayerId);
+                if (!activeLayer) return;
+
+                undoStack.push(captureState());
+                if (undoStack.length > MAX_HISTORY) undoStack.shift();
+                redoStack = [];
+
+                const left = Math.min(selection.startX, selection.endX);
+                const top = Math.min(selection.startY, selection.endY);
+                const right = Math.max(selection.startX, selection.endX);
+                const bottom = Math.max(selection.startY, selection.endY);
+
+                for (let y = top; y <= bottom; y++) {
+                    for (let x = left; x <= right; x++) {
+                        activeLayer.data[y * gridSize + x] = 'transparent';
+                    }
+                }
+                renderComposition();
+                selection = null;
+                updateMarquee();
+            }
         }
     });
 
     document.getElementById('btn-pencil').addEventListener('click', (e) => setTool('pencil', e.currentTarget));
+    // Binding event interface link to the selection node
+    const btnSelect = document.getElementById('btn-select');
+    if (btnSelect) {
+        btnSelect.addEventListener('click', (e) => setTool('select', e.currentTarget));
+    }
     document.getElementById('btn-eraser').addEventListener('click', (e) => setTool('eraser', e.currentTarget));
     document.getElementById('btn-bucket').addEventListener('click', (e) => setTool('bucket', e.currentTarget));
     document.getElementById('btn-line').addEventListener('click', (e) => setTool('line', e.currentTarget));
@@ -705,7 +803,7 @@ function setupEventListeners() {
     
     document.getElementById('fps-input').addEventListener('change', (e) => {
         fps = Math.max(1, parseInt(e.target.value) || 8);
-        if (isPlaying) { togglePlay(); togglePlay(); } // restart interval
+        if (isPlaying) { togglePlay(); togglePlay(); } 
     });
 
     document.getElementById('btn-onion').addEventListener('click', (e) => {
@@ -718,17 +816,6 @@ function setupEventListeners() {
 
     document.getElementById('btn-export').addEventListener('click', exportCurrentFrame);
     document.getElementById('btn-export-spritesheet').addEventListener('click', exportSpriteSheet);
-}
-
-function setTool(toolName, activeBtn) {
-    currentTool = toolName;
-    toolBtns.forEach(btn => btn.classList.remove('active'));
-    activeBtn.classList.add('active');
-}
-
-function updateActiveSwatch(activeSwatch) {
-    swatches.forEach(swatch => swatch.classList.remove('active'));
-    if (activeSwatch) activeSwatch.classList.add('active');
 }
 
 /* EXPORTS */
@@ -777,7 +864,6 @@ function exportSpriteSheet() {
             layer.data.forEach((color, index) => {
                 if (color && color !== 'transparent') {
                     ctx.fillStyle = color;
-                    // Offset X by the frame index * grid size
                     const x = (fIndex * gridSize) + (index % gridSize);
                     const y = Math.floor(index / gridSize);
                     ctx.fillRect(x, y, 1, 1);
