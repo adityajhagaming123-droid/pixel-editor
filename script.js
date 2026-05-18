@@ -48,7 +48,7 @@ const MAX_HISTORY = 40;
 /* LAYER & ANIMATION ENGINE ARRAYS */
 let frames = [];
 let currentFrameIndex = 0;
-let layers = []; // Points to current frame's layers
+let layers = [];
 let activeLayerId = null;
 let layerCounter = 0;
 
@@ -105,14 +105,12 @@ function createGrid(size) {
     if (!showGrid) canvas.classList.add('hide-grid');
 
     for (let i = 0; i < size * size; i++) {
-        // Main canvas pixel element
         const pixel = document.createElement('div');
         pixel.classList.add('pixel');
         pixel.dataset.index = i;
         canvas.appendChild(pixel);
         pixels.push(pixel);
 
-        // Onion canvas pixel element
         const oPixel = document.createElement('div');
         oPixel.classList.add('pixel');
         onionCanvas.appendChild(oPixel);
@@ -361,23 +359,27 @@ function getPixelCoords(clientX, clientY) {
     };
 }
 
+// ✅ BUG FIX 2: Moved the active layer guard BELOW the select tool check.
+// Previously the guard returned early before the select tool could run,
+// meaning the select tool was blocked if a layer was hidden or missing.
 function handlePointerDown(clientX, clientY) {
-    const activeLayer = layers.find(l => l.id === activeLayerId);
-    if (!activeLayer || !activeLayer.visible) return;
-
     const coords = getPixelCoords(clientX, clientY);
     startX = coords.x;
     startY = coords.y;
     lastX = startX;
     lastY = startY;
-
     isDrawing = true;
 
+    // Select tool does NOT need a valid drawing layer — handle it first
     if (currentTool === 'select') {
         selection = { startX: startX, startY: startY, endX: startX, endY: startY };
         updateMarquee();
         return;
     }
+
+    // All drawing tools DO need a valid, visible layer
+    const activeLayer = layers.find(l => l.id === activeLayerId);
+    if (!activeLayer || !activeLayer.visible) return;
 
     if (selection) {
         selection = null;
@@ -480,7 +482,6 @@ function drawBrush(cx, cy, color, layer) {
     }
 }
 
-// Draw Processing Math
 function drawLine(x0, y0, x1, y1, color, layer) {
     const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
     const sx = (x0 < x1) ? 1 : -1, sy = (y0 < y1) ? 1 : -1;
@@ -664,9 +665,11 @@ function setTool(toolName, activeBtn) {
     }
 }
 
+// ✅ BUG FIX 1: Was using undefined variable 'pointer-swatch' (a JS expression, not a variable).
+// Corrected to use the function parameter 'activeSwatch'.
 function updateActiveSwatch(activeSwatch) {
     swatches.forEach(swatch => swatch.classList.remove('active'));
-    if (activeSwatch) pointer-swatch.classList.add('active');
+    if (activeSwatch) activeSwatch.classList.add('active');
 }
 
 function setupEventListeners() {
@@ -680,7 +683,7 @@ function setupEventListeners() {
 
     // Integrated Bounding Box Core Events
     canvas.addEventListener('mousedown', (e) => {
-        if (e.button !== 0) return; // Left click only
+        if (e.button !== 0) return;
         e.preventDefault();
         handlePointerDown(e.clientX, e.clientY);
     });
@@ -780,14 +783,21 @@ function setupEventListeners() {
 
     colorPicker.addEventListener('input', (e) => {
         currentColor = e.target.value;
-        setTool('pencil', document.getElementById('btn-pencil'));
+        // ✅ BUG FIX 3: Only switch to pencil if not using the select tool,
+        // so picking a color won't accidentally clear an active selection.
+        if (currentTool !== 'select') {
+            setTool('pencil', document.getElementById('btn-pencil'));
+        }
         updateActiveSwatch(null);
     });
 
     swatches.forEach(swatch => {
         swatch.addEventListener('click', (e) => {
-            currentColor = e.target.style.backgroundColor; 
-            setTool('pencil', document.getElementById('btn-pencil'));
+            currentColor = e.target.style.backgroundColor;
+            // ✅ BUG FIX 3: Same fix — preserve the select tool when picking a swatch color.
+            if (currentTool !== 'select') {
+                setTool('pencil', document.getElementById('btn-pencil'));
+            }
             updateActiveSwatch(e.target);
         });
     });
