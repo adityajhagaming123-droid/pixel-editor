@@ -222,7 +222,7 @@ select {
     flex: 1;
     height: 100vh;
     display: flex;
-    flex-direction: column; /* Stack canvas area and timeline */
+    flex-direction: column;
     background-color: var(--bg-dark);
 }
 
@@ -242,7 +242,7 @@ select {
 }
 
 .canvas-container {
-    position: relative; /* Crucial for overlapping onion skin */
+    position: relative;
     background-color: white;
     box-shadow: 0 0 20px rgba(0,0,0,0.5);
     display: inline-block;
@@ -261,8 +261,8 @@ select {
     top: 0;
     left: 0;
     display: grid;
-    opacity: 0.3; /* Translucent previous frame */
-    pointer-events: none; /* Let clicks pass through to main canvas */
+    opacity: 0.3;
+    pointer-events: none;
 }
 
 .pixel {
@@ -273,13 +273,11 @@ select {
     user-select: none;
 }
 
-/* Dynamically added by JS for 64x64 grid */
 .grid-64 .pixel {
     width: 8px;
     height: 8px;
 }
 
-/* Hides grid on the main canvas when toggled, and always hides it on the onion skin */
 .hide-grid .pixel,
 #onion-canvas .pixel {
     border: none !important;
@@ -344,4 +342,25 @@ select {
 .frame-item.active {
     background-color: var(--highlight);
     border-color: white;
+}
+
+/* --- Selection Tool Styles --- */
+#selection-marquee {
+    position: absolute;
+    border: 1px dashed white;
+    box-shadow: 0 0 0 1px black;
+    background-color: rgba(116, 140, 148, 0.3);
+    pointer-events: none;
+    z-index: 100;
+    display: none;
+}
+
+#selection-marquee.active {
+    display: block;
+    animation: march 0.5s linear infinite;
+}
+
+@keyframes march {
+    from { stroke-dashoffset: 0; }
+    to { stroke-dashoffset: 10px; }
 }
