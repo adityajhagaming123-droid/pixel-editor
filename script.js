@@ -105,16 +105,14 @@ function createGrid(size) {
     if (!showGrid) canvas.classList.add('hide-grid');
 
     for (let i = 0; i < size * size; i++) {
-        // Main canvas pixel
+        // Main canvas pixel element
         const pixel = document.createElement('div');
         pixel.classList.add('pixel');
         pixel.dataset.index = i;
-        pixel.addEventListener('mousedown', startDrawing);
-        pixel.addEventListener('mouseenter', draw);
         canvas.appendChild(pixel);
         pixels.push(pixel);
 
-        // Onion canvas pixel
+        // Onion canvas pixel element
         const oPixel = document.createElement('div');
         oPixel.classList.add('pixel');
         onionCanvas.appendChild(oPixel);
@@ -168,7 +166,6 @@ function loadFrame(index) {
     currentFrameIndex = index;
     layers = frames[currentFrameIndex].layers;
     
-    // Ensure activeLayerId is still valid in new frame
     if (!layers.find(l => l.id === activeLayerId)) {
         activeLayerId = layers[0] ? layers[0].id : null;
     }
@@ -202,7 +199,6 @@ function updateFrameUI() {
 function addNewFrame(duplicate = false) {
     let newLayers = [];
     if (duplicate) {
-        // Deep copy current layers
         newLayers = layers.map(l => ({
             id: 'layer_' + (++layerCounter),
             name: l.name,
@@ -210,7 +206,6 @@ function addNewFrame(duplicate = false) {
             data: [...l.data]
         }));
     } else {
-        // Create blank layers matching current structure
         newLayers = layers.map(l => ({
             id: 'layer_' + (++layerCounter),
             name: l.name,
@@ -355,30 +350,35 @@ function redo() {
     }
 }
 
-/* DRAW ENGINE RUNTIME INTERACTION HANDLERS */
-function startDrawing(e) {
-    if (!e.target.classList.contains('pixel')) return;
-    if (e.preventDefault) e.preventDefault(); 
+/* GLOBAL BOUNDING-BOX COORD SCANNER */
+function getPixelCoords(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor(((clientX - rect.left) / rect.width) * gridSize);
+    const y = Math.floor(((clientY - rect.top) / rect.height) * gridSize);
+    return {
+        x: Math.max(0, Math.min(gridSize - 1, x)),
+        y: Math.max(0, Math.min(gridSize - 1, y))
+    };
+}
 
+function handlePointerDown(clientX, clientY) {
     const activeLayer = layers.find(l => l.id === activeLayerId);
-    if (!activeLayer || !activeLayer.visible) return; 
+    if (!activeLayer || !activeLayer.visible) return;
 
-    const index = parseInt(e.target.dataset.index);
-    startX = index % gridSize;
-    startY = Math.floor(index / gridSize);
-    
+    const coords = getPixelCoords(clientX, clientY);
+    startX = coords.x;
+    startY = coords.y;
     lastX = startX;
     lastY = startY;
 
-    // Handle initial selection tracking setup
+    isDrawing = true;
+
     if (currentTool === 'select') {
-        isDrawing = true;
         selection = { startX: startX, startY: startY, endX: startX, endY: startY };
         updateMarquee();
-        return; 
+        return;
     }
 
-    // Wipe previous selection bounds if using regular brushes
     if (selection) {
         selection = null;
         updateMarquee();
@@ -388,24 +388,23 @@ function startDrawing(e) {
     if (undoStack.length > MAX_HISTORY) undoStack.shift();
     redoStack = []; 
 
-    isDrawing = true;
     snapshotState = [...activeLayer.data]; 
-    applyTool(index);
+    applyToolAtCoords(startX, startY);
 }
 
-function draw(e) {
-    if (isDrawing && e.target.classList.contains('pixel')) {
-        const index = parseInt(e.target.dataset.index);
-        
-        if (currentTool === 'select') {
-            selection.endX = index % gridSize;
-            selection.endY = Math.floor(index / gridSize);
-            updateMarquee();
-            return;
-        }
+function handlePointerMove(clientX, clientY) {
+    if (!isDrawing) return;
 
-        applyTool(index);
+    const coords = getPixelCoords(clientX, clientY);
+    
+    if (currentTool === 'select') {
+        selection.endX = coords.x;
+        selection.endY = coords.y;
+        updateMarquee();
+        return;
     }
+
+    applyToolAtCoords(coords.x, coords.y);
 }
 
 function stopDrawing() { 
@@ -414,40 +413,11 @@ function stopDrawing() {
     lastY = -1;
 }
 
-window.addEventListener('mouseup', stopDrawing);
-
-// Touch support implementations
-window.addEventListener('touchstart', (e) => {
-    const touch = e.touches[0];
-    const target = document.elementFromPoint(touch.clientX, touch.clientY);
-    if (target && target.classList.contains('pixel')) {
-        startDrawing({ target: target, preventDefault: () => e.preventDefault() });
-    }
-}, { passive: false });
-
-window.addEventListener('touchmove', (e) => {
-    if (!isDrawing) return;
-    e.preventDefault();
-    const touch = e.touches[0];
-    const target = document.elementFromPoint(touch.clientX, touch.clientY);
-    if (target && target.classList.contains('pixel')) {
-        const index = parseInt(target.dataset.index);
-        if (currentTool === 'select') {
-            selection.endX = index % gridSize;
-            selection.endY = Math.floor(index / gridSize);
-            updateMarquee();
-        } else {
-            applyTool(index);
-        }
-    }
-}, { passive: false });
-
-window.addEventListener('touchend', stopDrawing);
-
-function applyTool(index) {
-    const currentX = index % gridSize;
-    const currentY = Math.floor(index / gridSize);
+function applyToolAtCoords(currentX, currentY) {
     const activeLayer = layers.find(l => l.id === activeLayerId);
+    if (!activeLayer) return;
+    
+    const index = currentY * gridSize + currentX;
 
     if (currentTool === 'pencil' || currentTool === 'eraser') {
         const targetColor = (currentTool === 'pencil') ? currentColor : 'transparent';
@@ -510,7 +480,7 @@ function drawBrush(cx, cy, color, layer) {
     }
 }
 
-// Drawing Algorithms
+// Draw Processing Math
 function drawLine(x0, y0, x1, y1, color, layer) {
     const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
     const sx = (x0 < x1) ? 1 : -1, sy = (y0 < y1) ? 1 : -1;
@@ -688,7 +658,6 @@ function setTool(toolName, activeBtn) {
     toolBtns.forEach(btn => btn.classList.remove('active'));
     if (activeBtn) activeBtn.classList.add('active');
 
-    // Remove visible marquee states if switching to a non-selection framework
     if (selection && currentTool !== 'select') {
         selection = null;
         updateMarquee();
@@ -697,10 +666,11 @@ function setTool(toolName, activeBtn) {
 
 function updateActiveSwatch(activeSwatch) {
     swatches.forEach(swatch => swatch.classList.remove('active'));
-    if (activeSwatch) activeSwatch.classList.add('active');
+    if (activeSwatch) pointer-swatch.classList.add('active');
 }
 
 function setupEventListeners() {
+    // Advanced Scale Zoom Handler
     workspaceWrapper.addEventListener('wheel', function(e) {
         e.preventDefault(); 
         if (e.deltaY < 0) { currentScale += 0.1; } else { currentScale -= 0.1; }
@@ -708,6 +678,41 @@ function setupEventListeners() {
         canvasContainer.style.transform = `scale(${currentScale})`;
     }, { passive: false });
 
+    // Integrated Bounding Box Core Events
+    canvas.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return; // Left click only
+        e.preventDefault();
+        handlePointerDown(e.clientX, e.clientY);
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        handlePointerMove(e.clientX, e.clientY);
+    });
+
+    window.addEventListener('mouseup', () => {
+        stopDrawing();
+    });
+
+    // Touch Support Systems
+    canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+            e.preventDefault();
+            handlePointerDown(e.touches[0].clientX, e.touches[0].clientY);
+        }
+    }, { passive: false });
+
+    window.addEventListener('touchmove', (e) => {
+        if (isDrawing && e.touches.length === 1) {
+            e.preventDefault();
+            handlePointerMove(e.touches[0].clientX, e.touches[0].clientY);
+        }
+    }, { passive: false });
+
+    window.addEventListener('touchend', () => {
+        stopDrawing();
+    });
+
+    // Keyboard Hotkeys
     window.addEventListener('keydown', (e) => {
         if (e.ctrlKey || e.metaKey) {
             if (e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) { redo(); } else { undo(); } }
@@ -715,7 +720,6 @@ function setupEventListeners() {
         } else {
             if (e.key.toLowerCase() === 'g') toggleGrid();
             
-            // Delete key selection clear processing 
             if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
                 const activeLayer = layers.find(l => l.id === activeLayerId);
                 if (!activeLayer) return;
@@ -741,8 +745,8 @@ function setupEventListeners() {
         }
     });
 
+    // Sidebar Tool Mappings
     document.getElementById('btn-pencil').addEventListener('click', (e) => setTool('pencil', e.currentTarget));
-    // Binding event interface link to the selection node
     const btnSelect = document.getElementById('btn-select');
     if (btnSelect) {
         btnSelect.addEventListener('click', (e) => setTool('select', e.currentTarget));
@@ -795,7 +799,7 @@ function setupEventListeners() {
         } else { e.target.value = gridSize; }
     });
 
-    // Timeline Events
+    // Timeline Interface Triggers
     document.getElementById('btn-add-frame').addEventListener('click', () => addNewFrame(false));
     document.getElementById('btn-dup-frame').addEventListener('click', () => addNewFrame(true));
     document.getElementById('btn-del-frame').addEventListener('click', deleteFrame);
