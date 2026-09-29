@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Pixeledit — Pixel Art &amp; Animation Studio</title>
-  <meta name="description" content="A fast, feature-rich pixel art and sprite animation editor that runs in your browser: layers, blend modes, onion skinning, dithering, symmetry, palettes and GIF export.">
+  <title>Pixeledit — Pixel Art &amp; Sprite Studio for Unity 2D</title>
+  <meta name="description" content="A pixel art and sprite animation editor for Unity 2D games that runs in your browser: game asset templates, animation tags, pivots, one-click Unity export (sliced sprites, animation clips, Animator) and a Claude AI assistant.">
   <meta name="theme-color" content="#15161c">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Crect width='8' height='8' fill='%2315161c'/%3E%3Cpath fill='%236c8cff' d='M1 1h4v1H1zM1 2h1v5H1zM5 2h1v2H5zM2 4h3v1H2z'/%3E%3Cpath fill='%23ff5c7a' d='M5 5h2v2H5z'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -26,7 +26,9 @@
         <button class="icon-btn" data-cmd="undo" aria-label="Undo"><i data-icon="undo"></i></button>
         <button class="icon-btn" data-cmd="redo" aria-label="Redo"><i data-icon="redo"></i></button>
         <span class="vsep"></span>
-        <button class="btn btn-accent" data-cmd="exportPng" title="Export PNG, spritesheet or GIF (Ctrl+E)"><i data-icon="download"></i><span class="hide-sm">Export</span></button>
+        <button class="btn btn-claude" data-cmd="claude" aria-label="Claude assistant" title="Claude assistant — draw, animate, edit and review sprites (Alt+A)"><i data-icon="claude"></i><span class="hide-sm">Claude</span></button>
+        <button class="btn" data-cmd="exportPng" aria-label="Export" title="Export PNG, spritesheet or GIF (Ctrl+E)"><i data-icon="download"></i><span class="hide-sm">Export</span></button>
+        <button class="btn btn-accent" data-cmd="exportUnity" aria-label="Export for Unity" title="Export for Unity — sliced sprite sheet, animation clips and Animator (Ctrl+Shift+U)"><i data-icon="cube"></i><span class="hide-sm">Unity</span></button>
         <button class="icon-btn" data-cmd="togglePanels" aria-label="Toggle side panels"><i data-icon="panel"></i></button>
       </div>
     </header>
@@ -114,6 +116,7 @@
               <button class="icon-btn sm" data-cmd="mergeDown" aria-label="Merge down"><i data-icon="merge"></i></button>
               <button class="icon-btn sm" data-cmd="layerUp" aria-label="Move layer up"><i data-icon="chevronUp"></i></button>
               <button class="icon-btn sm" data-cmd="layerDown" aria-label="Move layer down"><i data-icon="chevronDown"></i></button>
+              <button class="icon-btn sm" data-cmd="toggleLayerGuide" aria-label="Toggle guide layer" title="Guide layer — visible while editing, never exported"><i data-icon="guide"></i></button>
               <span class="grow"></span>
               <button class="icon-btn sm danger" data-cmd="deleteLayer" aria-label="Delete layer"><i data-icon="trash"></i></button>
             </div>
@@ -164,6 +167,9 @@
           <button class="btn toggle" id="btn-onion" data-cmd="toggleOnion"><i data-icon="layers"></i><span>Onion skin</span></button>
           <button class="icon-btn" id="btn-onion-settings" title="Onion skin settings" aria-label="Onion skin settings"><i data-icon="settings"></i></button>
         </div>
+        <div class="tl-group">
+          <button class="btn toggle" data-cmd="newTag" title="New animation tag from the current frame or a Shift+clicked range (Alt+T)"><i data-icon="tag"></i><span>Tag</span></button>
+        </div>
         <div class="tl-group tl-right">
           <button class="icon-btn" data-cmd="newFrame" aria-label="New frame"><i data-icon="plus"></i></button>
           <button class="icon-btn" data-cmd="duplicateFrame" aria-label="Duplicate frame"><i data-icon="copy"></i></button>
@@ -198,6 +204,9 @@
   <script src="js/palettes.js"></script>
   <script src="js/gif.js"></script>
   <script src="js/icons.js"></script>
+  <script src="js/unity.js"></script>
+  <script src="js/templates.js"></script>
+  <script src="js/claude.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

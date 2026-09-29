@@ -16,7 +16,9 @@
     settings: 'pixeledit.settings.v2',
     palette: 'pixeledit.palette.v2',
     recent: 'pixeledit.recent.v2',
+    claude: 'pixeledit.claude.v1',
   };
+  const TAG_COLORS = ['#6c8cff', '#3ddc97', '#ffb547', '#ff5c7a', '#b57bff', '#4dd0e1', '#ff8a4d', '#a3e635'];
   const BLEND_MODES = [
     ['normal', 'Normal', 'source-over'],
     ['multiply', 'Multiply', 'multiply'],
@@ -81,6 +83,15 @@
     collapsed: {},
     previewScale: 0,
     exportScale: 4,
+    showPivot: true,
+    playTagOnly: true,
+    unityPPU: 16,
+    unityExport: { clips: true, controller: true, json: false, layout: 'grid', padding: 0, skipEmpty: true },
+    claudeModel: 'claude-opus-5-5',
+    claudeEffort: 'medium',
+    claudeTask: 'draw',
+    claudePlace: 'layer',
+    claudeStrict: true,
   };
 
   function readJSON(key, fallback = null) {
@@ -122,6 +133,7 @@
     lasso: { name: 'Lasso Select', key: 'Q', icon: 'lasso', options: ['selMode', 'selActions'], hint: 'Draw a freehand selection · Shift: add · Alt: subtract' },
     wand: { name: 'Magic Wand', key: 'W', icon: 'wand', options: ['selMode', 'wandContiguous', 'wandTolerance', 'selActions'], hint: 'Select similar colors · Shift: add · Alt: subtract' },
     move: { name: 'Move', key: 'V', icon: 'move', options: ['moveHint'], hint: 'Drag to move the selection or the whole layer · Arrow keys nudge' },
+    pivot: { name: 'Pivot', key: 'P', icon: 'pivot', options: ['pivotPresets', 'pivotXY', 'ppu', 'showPivot'], hint: 'Click or drag to place the Unity pivot · snaps to half pixels · Shift snaps to whole pixels' },
     hand: { name: 'Hand', key: 'H', icon: 'hand', options: ['handHint'], hint: 'Drag to pan · Hold Space with any tool · Middle mouse button' },
   };
   const TOOL_GROUPS = [
@@ -129,7 +141,7 @@
     ['line', 'rect', 'ellipse'],
     ['dither', 'shade'],
     ['select', 'lasso', 'wand', 'move'],
-    ['hand'],
+    ['pivot', 'hand'],
   ];
   const PAINT_TOOLS = new Set(['pencil', 'eraser', 'bucket', 'gradient', 'line', 'rect', 'ellipse', 'dither', 'shade']);
   const BRUSH_TOOLS = new Set(['pencil', 'eraser', 'dither', 'shade', 'line', 'rect', 'ellipse']);
@@ -222,6 +234,8 @@
   const touches = new Map();
   let antsPhase = 0;
   let paletteSel = -1;
+  let activeTagId = null;
+  let frameRange = null; // { a, b } frames picked with Shift+click (for new tags)
 
   // ===========================================================================
   // Document model
@@ -230,13 +244,60 @@
   const celKey = (lid, fid) => lid + '|' + fid;
 
   function makeLayer(name) {
-    return { id: uid('L'), name, visible: true, locked: false, opacity: 100, blend: 'normal' };
+    return { id: uid('L'), name, visible: true, locked: false, opacity: 100, blend: 'normal', guide: false };
   }
   function makeFrame(duration = 100) {
     return { id: uid('F'), duration };
   }
+  function makeUnity(ppu = settings.unityPPU) {
+    return { ppu: clamp(Math.round(+ppu) || 16, 1, 4096), guid: UnityExport.randomGuid(), border: [0, 0, 0, 0], kind: null, tile: 0 };
+  }
   function createSprite(width, height, name = 'untitled') {
-    return { name, width, height, layers: [makeLayer('Layer 1')], frames: [makeFrame(100)], cels: new Map() };
+    return {
+      name,
+      width,
+      height,
+      layers: [makeLayer('Layer 1')],
+      frames: [makeFrame(100)],
+      cels: new Map(),
+      tags: [],
+      pivot: { x: width / 2, y: height / 2 },
+      unity: makeUnity(),
+      template: null,
+    };
+  }
+  const hasGuides = () => sprite.layers.some((l) => l.guide);
+  const artLayers = () => sprite.layers.filter((l) => !l.guide);
+
+  // --- animation tags (inclusive frame ranges) --------------------------------------
+  function tagsAt(i) {
+    return sprite.tags.filter((t) => i >= t.from && i <= t.to);
+  }
+  function tagAt(i) {
+    const list = tagsAt(i);
+    return list.find((t) => t.id === activeTagId) || list[0] || null;
+  }
+  function nextTagColor() {
+    const used = new Set(sprite.tags.map((t) => t.color));
+    return TAG_COLORS.find((c) => !used.has(c)) || TAG_COLORS[sprite.tags.length % TAG_COLORS.length];
+  }
+  /** Keeps tag ranges attached to their frames when a frame is inserted after index `after`. */
+  function tagsFrameInserted(after) {
+    for (const t of sprite.tags) {
+      if (after < t.from) {
+        t.from++;
+        t.to++;
+      } else if (after <= t.to) t.to++;
+    }
+  }
+  function tagsFrameDeleted(i) {
+    for (const t of sprite.tags) {
+      if (i < t.from) {
+        t.from--;
+        t.to--;
+      } else if (i <= t.to) t.to--;
+    }
+    sprite.tags = sprite.tags.filter((t) => t.to >= t.from);
   }
   function activeLayer() {
     return sprite.layers.find((l) => l.id === activeLayerId) || null;
@@ -275,6 +336,8 @@
       layers: sprite.layers.map((l) => ({ ...l })),
       frames: sprite.frames.map((f) => ({ ...f })),
       cels: new Map(sprite.cels),
+      tags: sprite.tags.map((t) => ({ ...t })),
+      pivot: { ...sprite.pivot },
       activeLayerId,
       frameIndex,
       selection,
@@ -290,13 +353,15 @@
     sprite.height = s.height;
     sprite.layers = s.layers.map((l) => {
       const c = curLayers.get(l.id);
-      return c ? { ...l, name: c.name, visible: c.visible, locked: c.locked, opacity: c.opacity, blend: c.blend } : { ...l };
+      return c ? { ...l, name: c.name, visible: c.visible, locked: c.locked, opacity: c.opacity, blend: c.blend, guide: c.guide } : { ...l };
     });
     sprite.frames = s.frames.map((f) => {
       const c = curFrames.get(f.id);
       return c ? { ...f, duration: c.duration } : { ...f };
     });
     sprite.cels = new Map(s.cels);
+    sprite.tags = s.tags.map((t) => ({ ...t }));
+    sprite.pivot = { ...s.pivot };
     activeLayerId = sprite.layers.some((l) => l.id === s.activeLayerId) ? s.activeLayerId : sprite.layers[sprite.layers.length - 1].id;
     frameIndex = clamp(s.frameIndex, 0, sprite.frames.length - 1);
     selection = s.selection && s.selection.mask.length === sprite.width * sprite.height ? s.selection : null;
@@ -402,12 +467,17 @@
 
   function docChanged() {
     structStamp++;
-    for (const id of compCache.keys()) if (!sprite.frames.some((f) => f.id === id)) compCache.delete(id);
+    const ids = new Set(sprite.frames.map((f) => f.id));
+    for (const k of compCache.keys()) if (!ids.has(k.split(':')[0])) compCache.delete(k);
     requestRender();
     refreshLayers();
     refreshFrames();
     refreshStatus();
     refreshHistoryButtons();
+    if (tool === 'pivot') refreshOptions();
+    if (activeTagId && !sprite.tags.some((t) => t.id === activeTagId)) activeTagId = null;
+    if (frameRange && Math.max(frameRange.a, frameRange.b) >= sprite.frames.length) frameRange = null;
+    if (preview.playing) preview.dir.range = playRange(clamp(preview.index, 0, sprite.frames.length - 1));
     scheduleAutosave();
   }
 
@@ -441,13 +511,16 @@
     return out;
   }
 
-  function compEntry(fi) {
+  /** Composite of a frame. `final` leaves out guide layers (what gets exported). */
+  function compEntry(fi, final = false) {
     const frame = sprite.frames[fi];
-    let e = compCache.get(frame.id);
+    if (final && !hasGuides()) final = false;
+    const key = final ? frame.id + ':final' : frame.id;
+    let e = compCache.get(key);
     if (!e) {
       const canvas = document.createElement('canvas');
       e = { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true }), stamp: -1, struct: -1 };
-      compCache.set(frame.id, e);
+      compCache.set(key, e);
     }
     const W = sprite.width, H = sprite.height;
     const stamp = frameStamps.get(frame.id) || 0;
@@ -459,7 +532,7 @@
     ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, W, H);
     for (const layer of sprite.layers) {
-      if (!layer.visible || layer.opacity <= 0) continue;
+      if (!layer.visible || layer.opacity <= 0 || (final && layer.guide)) continue;
       const cel = getCel(layer.id, frame.id);
       if (!cel) continue;
       scratchCtx.putImageData(toImageData(cel, W, H), 0, 0);
@@ -473,8 +546,8 @@
     e.struct = structStamp;
     return e;
   }
-  const getComposite = (fi) => compEntry(fi).canvas;
-  const compositePixels = (fi) => readPixels(compEntry(fi).ctx, sprite.width, sprite.height);
+  const getComposite = (fi, final = false) => compEntry(fi, final).canvas;
+  const compositePixels = (fi, final = false) => readPixels(compEntry(fi, final).ctx, sprite.width, sprite.height);
 
   /** Draws `top` over `bottom` with an opacity and blend mode; returns new pixels. */
   function blendCels(bottom, top, opacity, blend) {
@@ -503,7 +576,7 @@
       const cel = l && getCel(l.id, currentFrame().id);
       return cel ? cel[y * sprite.width + x] : 0;
     }
-    const d = compEntry(frameIndex).ctx.getImageData(x, y, 1, 1).data;
+    const d = compEntry(frameIndex, true).ctx.getImageData(x, y, 1, 1).data;
     return Color.pack(d[0], d[1], d[2], d[3]);
   }
 
@@ -598,8 +671,57 @@
     drawGrid(c, ox, oy, z, cw, ch);
     drawSymmetryGuides(c, ox, oy, z, dw, dh);
     drawSelection(c, ox, oy, z);
+    drawUnityOverlay(c, ox, oy, z, dw, dh);
     drawToolOverlay(c, ox, oy, z);
     drawPreview();
+  }
+
+  /** Pivot crosshair and 9-slice border lines. */
+  function drawUnityOverlay(c, ox, oy, z, dw, dh) {
+    if (playing || !(settings.showPivot || tool === 'pivot')) return;
+    const dpr = view.dpr;
+    const b = sprite.unity.border;
+    if (b && (b[0] || b[1] || b[2] || b[3])) {
+      c.save();
+      c.setLineDash([5 * dpr, 4 * dpr]);
+      c.strokeStyle = 'rgba(61,220,151,0.85)';
+      c.lineWidth = Math.max(1, dpr);
+      c.beginPath();
+      const W = sprite.width, H = sprite.height;
+      const xs = [b[0], W - b[2]], ys = [H - b[1], b[3]];
+      for (const x of xs) {
+        const px = Math.round(ox + x * z) + 0.5;
+        c.moveTo(px, oy);
+        c.lineTo(px, oy + dh);
+      }
+      for (const y of ys) {
+        const py = Math.round(oy + y * z) + 0.5;
+        c.moveTo(ox, py);
+        c.lineTo(ox + dw, py);
+      }
+      c.stroke();
+      c.restore();
+    }
+    const px = Math.round(ox + sprite.pivot.x * z), py = Math.round(oy + sprite.pivot.y * z);
+    const r = Math.max(5, Math.min(10, z * 0.8)) * dpr, arm = r + 6 * dpr;
+    c.save();
+    c.lineCap = 'round';
+    for (const [w, col] of [[4 * dpr, 'rgba(0,0,0,0.6)'], [1.6 * dpr, tool === 'pivot' ? '#ff5c7a' : 'rgba(255,92,122,0.8)']]) {
+      c.lineWidth = w;
+      c.strokeStyle = col;
+      c.beginPath();
+      c.arc(px, py, r, 0, Math.PI * 2);
+      c.moveTo(px - arm, py);
+      c.lineTo(px - r * 0.35, py);
+      c.moveTo(px + r * 0.35, py);
+      c.lineTo(px + arm, py);
+      c.moveTo(px, py - arm);
+      c.lineTo(px, py - r * 0.35);
+      c.moveTo(px, py + r * 0.35);
+      c.lineTo(px, py + arm);
+      c.stroke();
+    }
+    c.restore();
   }
 
   function drawOnion(c, ox, oy, dw, dh) {
@@ -619,7 +741,7 @@
         const cel = getCel(activeLayerId, sprite.frames[fi].id);
         if (!cel) continue;
         tintCtx.putImageData(toImageData(cel, W, H), 0, 0);
-      } else tintCtx.drawImage(getComposite(fi), 0, 0);
+      } else tintCtx.drawImage(getComposite(fi, true), 0, 0);
       if (settings.onionTint) {
         tintCtx.globalCompositeOperation = 'source-atop';
         tintCtx.globalAlpha = 0.55;
@@ -758,7 +880,7 @@
     }
     if (!hover || pan || pinch) return;
     const t = effectiveTool();
-    if (t === 'hand' || t === 'move') return;
+    if (t === 'hand' || t === 'move' || t === 'pivot') return;
     if (BRUSH_TOOLS.has(t) && !(drag && SHAPE_TOOLS.has(drag.tool))) {
       const b = brushShape();
       const color = t === 'eraser' ? 'rgba(255,255,255,0.28)' : Color.toCss((primary & 0x00ffffff) | (Math.round(Color.alpha(primary) * 0.6) << 24));
@@ -1332,6 +1454,39 @@
     ms.version = hist.version;
   }
 
+  // --- pivot ------------------------------------------------------------------
+  const snapHalf = (v) => Math.round(v * 2) / 2;
+  function pivotTo(p, e) {
+    const snap = e && e.shiftKey ? Math.round : snapHalf;
+    const x = clamp(snap(p.fx), 0, sprite.width), y = clamp(snap(p.fy), 0, sprite.height);
+    if (x === sprite.pivot.x && y === sprite.pivot.y) return;
+    sprite.pivot = { x, y };
+    requestRender();
+    refreshPivotInputs();
+  }
+  function setPivot(x, y) {
+    x = clamp(snapHalf(+x || 0), -sprite.width, sprite.width * 2);
+    y = clamp(snapHalf(+y || 0), -sprite.height, sprite.height * 2);
+    if (x === sprite.pivot.x && y === sprite.pivot.y) return;
+    begin('Set Pivot');
+    sprite.pivot = { x, y };
+    commit();
+    refreshPivotInputs();
+  }
+  function refreshPivotInputs() {
+    const ix = document.getElementById('pivot-x'), iy = document.getElementById('pivot-y');
+    if (ix && document.activeElement !== ix) ix.value = sprite.pivot.x;
+    if (iy && document.activeElement !== iy) iy.value = sprite.pivot.y;
+    const n = document.getElementById('pivot-norm');
+    if (n) n.textContent = `Unity (${(sprite.pivot.x / sprite.width).toFixed(3).replace(/\.?0+$/, '')}, ${(1 - sprite.pivot.y / sprite.height).toFixed(3).replace(/\.?0+$/, '')})`;
+  }
+  /** Pixel position of a named pivot preset. */
+  function pivotPreset(name, W = sprite.width, H = sprite.height) {
+    const P = { tl: [0, 0], t: [W / 2, 0], tr: [W, 0], l: [0, H / 2], c: [W / 2, H / 2], r: [W, H / 2], bl: [0, H], b: [W / 2, H], br: [W, H] };
+    const [x, y] = P[name] || P.c;
+    return { x, y };
+  }
+
   // --- dispatch -------------------------------------------------------------
   function toolDown(t, p, e) {
     switch (t) {
@@ -1357,6 +1512,12 @@
         return selectDown(t, p, e);
       case 'move':
         return moveDown(p);
+      case 'pivot':
+        stopPlayback();
+        begin('Set Pivot');
+        S = { tool: 'pivot', start: { ...sprite.pivot } };
+        pivotTo(p, e);
+        return true;
     }
     return false;
   }
@@ -1390,12 +1551,22 @@
       case 'move':
         moveMove(p);
         break;
+      case 'pivot':
+        pivotTo(p, e);
+        break;
     }
   }
 
   function toolUp(t) {
     if (t === 'eyedropper' || !S) return;
     if (SELECT_TOOLS.has(t)) return selectUp();
+    if (t === 'pivot') {
+      const same = S.start.x === sprite.pivot.x && S.start.y === sprite.pivot.y;
+      S = null;
+      if (same) abort();
+      else commit();
+      return;
+    }
     if (t === 'pencil' || t === 'eraser' || t === 'dither' || t === 'shade') {
       lastPaint = { layerId: S.layerId, frameId: S.frameId, x: S.lx, y: S.ly };
     }
@@ -2049,16 +2220,29 @@
     activeLayerId = below.id;
     commit();
   }
+  /** Merges all art layers into one; guide layers are kept as they are. */
   function flatten() {
-    if (sprite.layers.length < 2) return;
+    if (artLayers().length < 2) return;
     begin('Flatten');
     const layer = makeLayer('Flattened');
     const cels = new Map();
+    for (const g of sprite.layers) {
+      if (!g.guide) continue;
+      for (const f of sprite.frames) {
+        const c = getCel(g.id, f.id);
+        if (c) cels.set(celKey(g.id, f.id), c);
+      }
+    }
     sprite.frames.forEach((f, fi) => {
-      const px = compositePixels(fi);
+      const px = compositePixels(fi, true);
       if (!isEmptyBuffer(px)) cels.set(celKey(layer.id, f.id), px);
     });
-    sprite.layers = [layer];
+    const out = [];
+    for (const l of sprite.layers) {
+      if (l.guide) out.push(l);
+      else if (!out.includes(layer)) out.push(layer);
+    }
+    sprite.layers = out;
     sprite.cels = cels;
     activeLayerId = layer.id;
     commit();
@@ -2100,6 +2284,14 @@
     layerPropsChanged();
     refreshLayers();
   }
+  function toggleLayerGuide(id) {
+    const layer = sprite.layers.find((l) => l.id === id);
+    if (!layer) return;
+    layer.guide = !layer.guide;
+    toast(layer.guide ? `“${layer.name}” is now a guide layer — visible while editing, never exported` : `“${layer.name}” is a normal layer again`, 'info', 3000, 'guide');
+    layerPropsChanged();
+    refreshLayers();
+  }
   function toggleLayerLock(id) {
     const layer = sprite.layers.find((l) => l.id === id);
     if (!layer) return;
@@ -2115,6 +2307,7 @@
     if (!fromPlayback) stopPlayback();
     if (i === frameIndex && !fromPlayback) return;
     frameIndex = i;
+    if (activeTagId && !tagsAt(i).some((t) => t.id === activeTagId)) activeTagId = null;
     requestRender();
     updateFrameSelection();
     refreshTimelineControls();
@@ -2137,6 +2330,7 @@
       }
     }
     sprite.frames.splice(frameIndex + 1, 0, frame);
+    tagsFrameInserted(frameIndex);
     frameIndex++;
     commit();
   }
@@ -2150,6 +2344,7 @@
     const f = currentFrame();
     for (const l of sprite.layers) sprite.cels.delete(celKey(l.id, f.id));
     sprite.frames.splice(frameIndex, 1);
+    tagsFrameDeleted(frameIndex);
     frameIndex = Math.min(frameIndex, sprite.frames.length - 1);
     commit();
   }
@@ -2171,15 +2366,63 @@
     stopPlayback();
     begin('Reverse Frames');
     const cur = currentFrame();
+    const n = sprite.frames.length;
     sprite.frames.reverse();
+    for (const t of sprite.tags) [t.from, t.to] = [n - 1 - t.to, n - 1 - t.from];
     frameIndex = sprite.frames.indexOf(cur);
     commit();
   }
 
+  // --- tags ---------------------------------------------------------------------
+  function selectTag(id) {
+    const t = sprite.tags.find((x) => x.id === id);
+    if (!t) return;
+    activeTagId = id;
+    frameRange = null;
+    const wasPlaying = playing;
+    setFrame(t.from);
+    refreshFrames();
+    if (wasPlaying) startPlayback();
+  }
+  function saveTag(tag, fields) {
+    const n = sprite.frames.length;
+    const from = clamp(Math.round(fields.from), 0, n - 1);
+    const to = clamp(Math.round(fields.to), from, n - 1);
+    begin(tag ? 'Edit Tag' : 'New Tag');
+    const data = { name: fields.name, from, to, color: fields.color, loop: !!fields.loop, pingpong: !!fields.pingpong };
+    if (tag) Object.assign(sprite.tags.find((t) => t.id === tag.id) || {}, data);
+    else {
+      const t = { id: uid('T'), ...data };
+      sprite.tags.push(t);
+      activeTagId = t.id;
+    }
+    sprite.tags.sort((a, b) => a.from - b.from || a.to - b.to);
+    frameRange = null;
+    commit();
+  }
+  function deleteTag(id) {
+    if (!sprite.tags.some((t) => t.id === id)) return;
+    begin('Delete Tag');
+    sprite.tags = sprite.tags.filter((t) => t.id !== id);
+    if (activeTagId === id) activeTagId = null;
+    commit();
+  }
+  function uniqueTagName(base) {
+    const names = new Set(sprite.tags.map((t) => t.name));
+    if (!names.has(base)) return base;
+    let i = 2;
+    while (names.has(base + i)) i++;
+    return base + i;
+  }
+
   // --- whole-sprite transforms --------------------------------------------------
-  function replaceAllCels(label, nw, nh, mapFn) {
+  function replaceAllCels(label, nw, nh, mapFn, pivotFn) {
     stopPlayback();
     begin(label);
+    if (pivotFn) {
+      const p = pivotFn(sprite.pivot);
+      sprite.pivot = { x: snapHalf(p.x), y: snapHalf(p.y) };
+    }
     const cels = new Map();
     for (const [k, buf] of sprite.cels) {
       const out = mapFn(buf);
@@ -2198,12 +2441,19 @@
     const W = sprite.width, H = sprite.height;
     const rot = kind === 'rotCW' || kind === 'rotCCW';
     const LABELS = { flipH: 'Flip Canvas Horizontal', flipV: 'Flip Canvas Vertical', rotCW: 'Rotate Canvas 90° CW', rotCCW: 'Rotate Canvas 90° CCW', rot180: 'Rotate Canvas 180°' };
-    replaceAllCels(LABELS[kind], rot ? H : W, rot ? W : H, (buf) => Geo.transformBlock(buf, null, W, H, kind).data);
+    const PIV = {
+      flipH: (p) => ({ x: W - p.x, y: p.y }),
+      flipV: (p) => ({ x: p.x, y: H - p.y }),
+      rotCW: (p) => ({ x: H - p.y, y: p.x }),
+      rotCCW: (p) => ({ x: p.y, y: W - p.x }),
+      rot180: (p) => ({ x: W - p.x, y: H - p.y }),
+    };
+    replaceAllCels(LABELS[kind], rot ? H : W, rot ? W : H, (buf) => Geo.transformBlock(buf, null, W, H, kind).data, PIV[kind]);
   }
   function resizeCanvas(nw, nh, ax, ay) {
     const W = sprite.width, H = sprite.height;
     const dx = Math.round((nw - W) * ax), dy = Math.round((nh - H) * ay);
-    replaceAllCels('Canvas Size', nw, nh, (buf) => crop(buf, W, H, -dx, -dy, nw, nh));
+    replaceAllCels('Canvas Size', nw, nh, (buf) => crop(buf, W, H, -dx, -dy, nw, nh), (p) => ({ x: p.x + dx, y: p.y + dy }));
   }
   function crop(buf, W, H, sx, sy, nw, nh) {
     const out = new Uint32Array(nw * nh);
@@ -2226,16 +2476,20 @@
         for (let x = 0; x < nw; x++) out[y * nw + x] = buf[sy * W + Math.min(W - 1, Math.floor(((x + 0.5) * W) / nw))];
       }
       return out;
-    });
+    }, (p) => ({ x: (p.x * nw) / W, y: (p.y * nh) / H }));
   }
   function cropToSelection() {
     if (!selection) return;
     const { x, y, w, h } = selection, W = sprite.width, H = sprite.height;
-    replaceAllCels('Crop', w, h, (buf) => crop(buf, W, H, x, y, w, h));
+    replaceAllCels('Crop', w, h, (buf) => crop(buf, W, H, x, y, w, h), (p) => ({ x: p.x - x, y: p.y - y }));
   }
   function trimSprite() {
     const W = sprite.width, H = sprite.height, any = new Uint8Array(W * H);
-    for (const buf of sprite.cels.values()) for (let i = 0; i < buf.length; i++) if (buf[i]) any[i] = 1;
+    const guides = new Set(sprite.layers.filter((l) => l.guide).map((l) => l.id));
+    for (const [k, buf] of sprite.cels) {
+      if (guides.has(k.split('|')[0])) continue;
+      for (let i = 0; i < buf.length; i++) if (buf[i]) any[i] = 1;
+    }
     const b = Geo.maskBounds(any, W, H);
     if (!b) {
       toast('The sprite is empty — nothing to trim', 'warn');
@@ -2245,23 +2499,32 @@
       toast('Nothing to trim');
       return;
     }
-    replaceAllCels('Trim', b.w, b.h, (buf) => crop(buf, W, H, b.x, b.y, b.w, b.h));
+    replaceAllCels('Trim', b.w, b.h, (buf) => crop(buf, W, H, b.x, b.y, b.w, b.h), (p) => ({ x: p.x - b.x, y: p.y - b.y }));
   }
 
   // ===========================================================================
   // Playback & preview
   // ===========================================================================
+  /** Frame range that playback loops over: the current tag, or every frame. */
+  function playRange(i) {
+    const t = settings.playTagOnly ? tagAt(i) : null;
+    if (t && t.to > t.from) return { lo: t.from, hi: t.to, pingpong: !!t.pingpong, tag: t };
+    return { lo: 0, hi: sprite.frames.length - 1, pingpong: settings.loopMode === 'pingpong', tag: null };
+  }
   function nextPlayIndex(i, dirRef) {
-    const n = sprite.frames.length;
-    if (n < 2) return 0;
+    const { lo, hi, pingpong } = dirRef.range || playRange(i);
+    if (hi <= lo) return lo;
     let next = i + dirRef.dir;
-    if (settings.loopMode === 'pingpong') {
-      if (next >= n || next < 0) {
+    if (pingpong) {
+      if (next > hi || next < lo) {
         dirRef.dir = -dirRef.dir;
         next = i + dirRef.dir;
       }
-    } else if (next >= n) next = 0;
-    return clamp(next, 0, n - 1);
+    } else {
+      dirRef.dir = 1;
+      if (next > hi || next < lo) next = lo;
+    }
+    return clamp(next, lo, hi);
   }
   const playDirRef = { dir: 1 };
   function startPlayback() {
@@ -2271,6 +2534,7 @@
     }
     playing = true;
     playDirRef.dir = playDir;
+    playDirRef.range = playRange(frameIndex);
     const tick = () => {
       if (!playing) return;
       playTimer = setTimeout(() => {
@@ -2325,7 +2589,7 @@
     }
     const dw = Math.max(1, Math.round(W * s)), dh = Math.max(1, Math.round(H * s));
     ctx.imageSmoothingEnabled = s < 1;
-    ctx.drawImage(getComposite(fi), Math.floor((cv.width - dw) / 2), Math.floor((cv.height - dh) / 2), dw, dh);
+    ctx.drawImage(getComposite(fi, true), Math.floor((cv.width - dw) / 2), Math.floor((cv.height - dh) / 2), dw, dh);
     dom.previewInfo.textContent = `${fi + 1} / ${sprite.frames.length}`;
   }
   function togglePreview() {
@@ -2333,6 +2597,7 @@
     clearTimeout(preview.timer);
     if (preview.playing) {
       preview.index = frameIndex;
+      preview.dir.range = playRange(frameIndex);
       const tick = () => {
         preview.timer = setTimeout(() => {
           if (!preview.playing || !sprite) return;
@@ -2696,6 +2961,48 @@
     selActions: () => optGroup('', cmdChip('selectAll', 'All'), cmdChip('deselect', 'None'), cmdChip('invertSelection', 'Invert')),
     moveHint: () => el('span', { class: 'opt-hint' }, 'Drag to move the selection, or the whole layer when nothing is selected. Arrow keys nudge 1px, Shift+Arrow 8px.'),
     handHint: () => el('span', { class: 'opt-hint' }, 'Tip: hold Space with any tool, or drag with the middle mouse button. Pinch to zoom on touch screens.'),
+    pivotPresets: () => {
+      const grid = el('div', { class: 'mini-anchor', title: 'Pivot presets' });
+      for (const k of ['tl', 't', 'tr', 'l', 'c', 'r', 'bl', 'b', 'br']) {
+        const p = pivotPreset(k);
+        const on = p.x === sprite.pivot.x && p.y === sprite.pivot.y;
+        grid.append(el('button', { class: 'ma' + (on ? ' active' : ''), title: { tl: 'Top left', t: 'Top center', tr: 'Top right', l: 'Middle left', c: 'Center', r: 'Middle right', bl: 'Bottom left', b: 'Bottom center (feet)', br: 'Bottom right' }[k], onclick: () => { setPivot(p.x, p.y); refreshOptions(); } }));
+      }
+      return optGroup('Pivot', grid);
+    },
+    pivotXY: () => {
+      const mk = (id, key) => {
+        const inp = el('input', { type: 'number', class: 'num', id, step: 0.5, value: sprite.pivot[key] });
+        inp.addEventListener('change', () => {
+          const v = +inp.value;
+          if (key === 'x') setPivot(v, sprite.pivot.y);
+          else setPivot(sprite.pivot.x, v);
+          refreshOptions();
+        });
+        return inp;
+      };
+      return optGroup('X', mk('pivot-x', 'x'), el('span', { class: 'opt-label' }, 'Y'), mk('pivot-y', 'y'), el('span', { class: 'opt-suffix', id: 'pivot-norm' }));
+    },
+    ppu: () => {
+      const inp = el('input', { type: 'number', class: 'num', min: 1, max: 4096, value: sprite.unity.ppu, title: 'Unity Pixels Per Unit — use the same value for every sprite in your game' });
+      const units = el('span', { class: 'opt-suffix' });
+      const upd = () => {
+        const u = sprite.unity.ppu;
+        units.textContent = `= ${+(sprite.width / u).toFixed(3)}×${+(sprite.height / u).toFixed(3)} units`;
+      };
+      inp.addEventListener('change', () => {
+        sprite.unity.ppu = clamp(Math.round(+inp.value) || 16, 1, 4096);
+        settings.unityPPU = sprite.unity.ppu;
+        inp.value = sprite.unity.ppu;
+        persistSettings();
+        scheduleAutosave();
+        refreshStatus();
+        upd();
+      });
+      upd();
+      return optGroup('PPU', inp, units);
+    },
+    showPivot: () => optToggle('showPivot', 'Always show', 'eye', 'Show the pivot (and 9-slice borders) with every tool'),
   };
   function refreshOptions() {
     const d = TOOLS[tool];
@@ -2705,6 +3012,7 @@
       const node = OPTION_UI[key] && OPTION_UI[key]();
       if (node) bar.append(node);
     }
+    if (tool === 'pivot') refreshPivotInputs();
   }
 
   // --- layers panel -------------------------------------------------------------
@@ -2720,7 +3028,7 @@
       const row = el(
         'div',
         {
-          class: 'layer-row' + (layer.id === activeLayerId ? ' active' : '') + (layer.visible ? '' : ' is-hidden'),
+          class: 'layer-row' + (layer.id === activeLayerId ? ' active' : '') + (layer.visible ? '' : ' is-hidden') + (layer.guide ? ' is-guide' : ''),
           draggable: true,
           dataset: { id: layer.id },
           onclick: () => selectLayer(layer.id),
@@ -2751,7 +3059,8 @@
           icon(layer.locked ? 'lock' : 'unlock')
         ),
         el('canvas', { class: 'lthumb', width: 64, height: 64, dataset: { lid: layer.id } }),
-        el('div', { class: 'ltext' }, name, meta ? el('span', { class: 'lmeta' }, meta) : null)
+        el('div', { class: 'ltext' }, name, meta ? el('span', { class: 'lmeta' }, meta) : null),
+        layer.guide ? el('span', { class: 'lbadge', title: 'Guide layer — shown while editing, never exported' }, 'guide') : null
       );
       row.addEventListener('dragstart', (e) => {
         dragLayerId = layer.id;
@@ -2832,11 +3141,16 @@
       const item = el(
         'div',
         {
-          class: 'frame' + (i === frameIndex ? ' active' : ''),
+          class: 'frame' + (i === frameIndex ? ' active' : '') + (inRange(i) ? ' in-range' : ''),
           draggable: true,
           dataset: { index: i },
-          title: `Frame ${i + 1} · ${f.duration} ms — double-click to set duration`,
-          onclick: () => setFrame(i),
+          title: `Frame ${i + 1} · ${f.duration} ms — double-click to set duration · Shift+click to select a range for a tag`,
+          onclick: (e) => {
+            if (e.shiftKey) frameRange = { a: frameRange ? frameRange.a : frameIndex, b: i };
+            else frameRange = null;
+            setFrame(i);
+            updateFrameSelection();
+          },
           ondblclick: () => frameDurationDialog(i),
         },
         el('canvas', { class: 'fthumb', width: 96, height: 96, dataset: { index: i } }),
@@ -2874,18 +3188,66 @@
       return item;
     });
     items.push(el('button', { class: 'frame-add', title: `New frame (${fmtKey('Alt+N')})`, onclick: () => addFrame(false) }, icon('plus')));
-    dom.frames.replaceChildren(...items);
+    const track = el('div', { class: 'frame-track' }, items);
+    dom.frames.replaceChildren(el('div', { class: 'tag-track' }), track);
+    layoutTags();
     refreshTimelineControls();
     scheduleThumbs();
   }
+  const inRange = (i) => !!frameRange && i >= Math.min(frameRange.a, frameRange.b) && i <= Math.max(frameRange.a, frameRange.b);
+
+  /** Draws the tag bars above the frames they cover (stacked when tags overlap). */
+  function layoutTags() {
+    const trackEl = dom.frames.querySelector('.tag-track');
+    if (!trackEl || !sprite) return;
+    const frames = dom.frames.querySelectorAll('.frame');
+    trackEl.replaceChildren();
+    if (!sprite.tags.length) {
+      trackEl.style.height = '';
+      trackEl.append(el('button', { class: 'tag-hint', onclick: () => tagDialog(null) }, icon('tag'), el('span', {}, 'Add an animation tag (idle, run, attack…) — each tag becomes a Unity animation clip')));
+      return;
+    }
+    const base = trackEl.offsetLeft;
+    const lanes = [];
+    for (const t of sprite.tags) {
+      const a = frames[t.from], b = frames[t.to];
+      if (!a || !b) continue;
+      let lane = lanes.findIndex((end) => end < t.from);
+      if (lane < 0) lane = lanes.push(-1) - 1;
+      lanes[lane] = t.to;
+      const len = t.to - t.from + 1;
+      trackEl.append(
+        el(
+          'button',
+          {
+            class: 'tag-bar' + (t.id === activeTagId ? ' active' : ''),
+            dataset: { id: t.id },
+            style: { left: a.offsetLeft - base + 'px', width: b.offsetLeft + b.offsetWidth - a.offsetLeft + 'px', top: lane * 22 + 'px', '--tag': t.color },
+            title: `${t.name} · frames ${t.from + 1}–${t.to + 1} (${len}) · ${t.loop ? 'loops' : 'plays once'}${t.pingpong ? ' · ping-pong' : ''}\nClick: select & play this clip · Double-click: edit`,
+            onclick: () => selectTag(t.id),
+            ondblclick: () => tagDialog(t),
+          },
+          el('span', { class: 'tag-name' }, t.name),
+          t.pingpong ? icon('repeat', 'tag-ic') : null,
+          t.loop ? null : el('span', { class: 'tag-once' }, '1×')
+        )
+      );
+    }
+    trackEl.style.height = lanes.length * 22 + 'px';
+  }
   function updateFrameSelection() {
-    dom.frames.querySelectorAll('.frame').forEach((f) => f.classList.toggle('active', +f.dataset.index === frameIndex));
+    dom.frames.querySelectorAll('.frame').forEach((f) => {
+      f.classList.toggle('active', +f.dataset.index === frameIndex);
+      f.classList.toggle('in-range', inRange(+f.dataset.index));
+    });
+    dom.frames.querySelectorAll('.tag-bar').forEach((b) => b.classList.toggle('active', b.dataset.id === activeTagId));
     const active = dom.frames.querySelector('.frame.active');
     if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
   function refreshTimelineControls() {
     if (!sprite) return;
-    dom.frameCounter.textContent = `${frameIndex + 1} / ${sprite.frames.length}`;
+    const t = tagAt(frameIndex);
+    dom.frameCounter.textContent = `${frameIndex + 1} / ${sprite.frames.length}` + (t ? ` · ${t.name} ${frameIndex - t.from + 1}/${t.to - t.from + 1}` : '');
     if (document.activeElement !== dom.frameDuration) dom.frameDuration.value = currentFrame().duration;
     dom.loopMode.value = settings.loopMode;
     dom.btnPlay.replaceChildren(icon(playing ? 'pause' : 'play'));
@@ -2920,7 +3282,7 @@
     });
     dom.frames.querySelectorAll('canvas.fthumb').forEach((cv) => {
       const i = +cv.dataset.index;
-      if (i < sprite.frames.length) drawThumb(cv, getComposite(i));
+      if (i < sprite.frames.length) drawThumb(cv, getComposite(i, true));
     });
   }
   const scheduleThumbs = debounce(drawThumbs, 90);
@@ -2941,7 +3303,8 @@
   function refreshStatus() {
     if (!sprite) return;
     dom.stHint.textContent = TOOLS[tool].hint;
-    dom.stSize.textContent = `${sprite.width}×${sprite.height}`;
+    dom.stSize.textContent = `${sprite.width}×${sprite.height} · ${sprite.unity.ppu} PPU`;
+    dom.stSize.title = `Unity: ${+(sprite.width / sprite.unity.ppu).toFixed(3)} × ${+(sprite.height / sprite.unity.ppu).toFixed(3)} units at ${sprite.unity.ppu} pixels per unit`;
     dom.stSel.textContent = selection ? `Selection ${selection.w}×${selection.h}` : '';
     dom.stSel.hidden = !selection;
     refreshZoomLabel();
@@ -3008,13 +3371,25 @@
   }
   const hasSel = () => !!selection;
 
-  command('newSprite', 'New Sprite…', 'Ctrl+Alt+N', newSpriteDialog);
+  command('newSprite', 'New Sprite…', 'Ctrl+Alt+N', () => newSpriteDialog());
   command('open', 'Open…', 'Ctrl+O', () => openFilePicker('auto'));
   command('importLayer', 'Import Image as Layer…', null, () => openFilePicker('layer'));
   command('saveProject', 'Save Project (.pxl)', 'Ctrl+S', saveProject);
   command('exportPng', 'Export PNG…', 'Ctrl+E', () => exportDialog('png'));
   command('exportSheet', 'Export Spritesheet…', null, () => exportDialog('sheet'));
   command('exportGif', 'Export Animated GIF…', 'Ctrl+Shift+E', () => exportDialog('gif'));
+  command('exportUnity', 'Export for Unity…', 'Ctrl+Shift+U', unityExportDialog);
+  command('unitySettings', 'Unity Sprite Settings…', null, unitySettingsDialog);
+
+  command('claude', 'Claude Assistant…', 'Alt+A', () => claudeDialog());
+  command('claudeDraw', 'Draw with Claude…', null, () => claudeDialog('draw'));
+  command('claudeAnimate', 'Animate with Claude…', null, () => claudeDialog('animate'));
+  command('claudeEdit', 'Edit Frame with Claude…', null, () => claudeDialog('edit'));
+  command('claudePalette', 'Palette from Claude…', null, () => claudeDialog('palette'));
+  command('claudeReview', 'Review with Claude…', null, () => claudeDialog('review'));
+  command('copySpriteText', 'Copy Frame as Sprite Text', null, copySpriteText);
+  command('importSpriteText', 'Import Sprite Text…', null, importSpriteTextDialog);
+  command('claudeSettings', 'Claude API Key…', null, claudeKeyDialog);
 
   command('undo', 'Undo', 'Ctrl+Z', undo, { enabled: () => hist.undo.length > 0 });
   command('redo', 'Redo', ['Ctrl+Y', 'Ctrl+Shift+Z'], redo, { enabled: () => hist.redo.length > 0 });
@@ -3062,13 +3437,14 @@
   command('deleteLayer', 'Delete Layer', null, deleteLayer, { enabled: () => sprite.layers.length > 1 });
   command('renameLayer', 'Rename Layer', 'F2', startRenameActive);
   command('mergeDown', 'Merge Down', 'Ctrl+M', mergeDown, { enabled: () => activeLayerIndex() > 0 });
-  command('flatten', 'Flatten', null, flatten, { enabled: () => sprite.layers.length > 1 });
+  command('flatten', 'Flatten', null, flatten, { enabled: () => artLayers().length > 1 });
   command('layerUp', 'Move Layer Up', 'Alt+Up', () => moveLayer(1), { enabled: () => activeLayerIndex() < sprite.layers.length - 1 });
   command('layerDown', 'Move Layer Down', 'Alt+Down', () => moveLayer(-1), { enabled: () => activeLayerIndex() > 0 });
   command('selectLayerAbove', 'Select Layer Above', 'Up', () => stepLayer(1));
   command('selectLayerBelow', 'Select Layer Below', 'Down', () => stepLayer(-1));
   command('toggleLayerVisible', 'Show / Hide Layer', null, () => toggleLayerVisible(activeLayerId));
   command('toggleLayerLock', 'Lock / Unlock Layer', null, () => toggleLayerLock(activeLayerId));
+  command('toggleLayerGuide', 'Guide Layer (not exported)', null, () => toggleLayerGuide(activeLayerId), { checked: () => !!(activeLayer() && activeLayer().guide) });
 
   command('newFrame', 'New Frame', 'Alt+N', () => addFrame(false));
   command('duplicateFrame', 'Duplicate Frame', 'Alt+Shift+N', () => addFrame(true));
@@ -3084,6 +3460,10 @@
   command('firstFrame', 'First Frame', 'Home', () => setFrame(0));
   command('lastFrame', 'Last Frame', 'End', () => setFrame(sprite.frames.length - 1));
   command('toggleOnion', 'Onion Skin', 'Alt+O', toggleOnion, { checked: () => settings.onion });
+  command('newTag', 'New Animation Tag…', 'Alt+T', () => tagDialog(null));
+  command('editTag', 'Edit Tag…', null, () => tagDialog(tagAt(frameIndex)), { enabled: () => !!tagAt(frameIndex) });
+  command('deleteTag', 'Delete Tag', null, () => deleteTag(tagAt(frameIndex).id), { enabled: () => !!tagAt(frameIndex) });
+  command('playTagOnly', 'Loop Current Tag When Playing', null, () => toggleSetting('playTagOnly'), { checked: () => settings.playTagOnly });
 
   command('zoomIn', 'Zoom In', ['=', '+'], () => stepZoom(1));
   command('zoomOut', 'Zoom Out', '-', () => stepZoom(-1));
@@ -3106,6 +3486,7 @@
   );
   command('toggleSymX', 'Horizontal Symmetry', 'Shift+X', () => toggleSetting('symX'), { checked: () => settings.symX });
   command('toggleSymY', 'Vertical Symmetry', 'Shift+Y', () => toggleSetting('symY'), { checked: () => settings.symY });
+  command('toggleShowPivot', 'Show Pivot & 9-slice', null, () => toggleSetting('showPivot'), { checked: () => settings.showPivot });
   command('togglePanels', 'Side Panels', 'Tab', togglePanels, { checked: () => panelsVisible() });
   command('toggleTimeline', 'Timeline', 'Shift+Tab', toggleTimeline, { checked: () => !settings.timelineHidden });
 
@@ -3113,13 +3494,14 @@
   command('about', 'About Pixeledit', null, aboutDialog);
 
   const MENU = [
-    ['File', ['newSprite', 'open', 'importLayer', '-', 'saveProject', '-', 'exportPng', 'exportSheet', 'exportGif']],
+    ['File', ['newSprite', 'open', 'importLayer', '-', 'saveProject', '-', 'exportUnity', 'exportPng', 'exportSheet', 'exportGif', '-', 'unitySettings']],
     ['Edit', ['undo', 'redo', '-', 'cut', 'copy', 'paste', 'delete', 'fillSelection', '-', 'flipH', 'flipV', 'rotateCW', 'rotateCCW', 'rotate180', '-', 'swapColors', 'resetColors']],
     ['Select', ['selectAll', 'deselect', 'invertSelection', 'selectOpaque']],
     ['Image', ['adjust', 'invertColors', 'desaturate', 'outline', 'replaceColor', '-', 'resizeCanvas', 'scaleSprite', 'crop', 'trim', '-', 'spriteFlipH', 'spriteFlipV', 'spriteRotCW', 'spriteRotCCW', 'spriteRot180']],
-    ['Layer', ['newLayer', 'duplicateLayer', 'deleteLayer', 'renameLayer', '-', 'mergeDown', 'flatten', '-', 'layerUp', 'layerDown', '-', 'toggleLayerVisible', 'toggleLayerLock']],
-    ['Frame', ['newFrame', 'duplicateFrame', 'deleteFrame', '-', 'frameLeft', 'frameRight', 'reverseFrames', '-', 'frameDuration', 'frameRate', '-', 'play', 'prevFrame', 'nextFrame', 'firstFrame', 'lastFrame', '-', 'toggleOnion']],
-    ['View', ['zoomIn', 'zoomOut', 'zoomFit', 'zoom100', '-', 'toggleGrid', 'gridSettings', 'toggleTileMode', 'toggleChecker', '-', 'toggleSymX', 'toggleSymY', '-', 'togglePanels', 'toggleTimeline']],
+    ['Layer', ['newLayer', 'duplicateLayer', 'deleteLayer', 'renameLayer', '-', 'mergeDown', 'flatten', '-', 'layerUp', 'layerDown', '-', 'toggleLayerVisible', 'toggleLayerLock', 'toggleLayerGuide']],
+    ['Frame', ['newFrame', 'duplicateFrame', 'deleteFrame', '-', 'frameLeft', 'frameRight', 'reverseFrames', '-', 'frameDuration', 'frameRate', '-', 'newTag', 'editTag', 'deleteTag', 'playTagOnly', '-', 'play', 'prevFrame', 'nextFrame', 'firstFrame', 'lastFrame', '-', 'toggleOnion']],
+    ['View', ['zoomIn', 'zoomOut', 'zoomFit', 'zoom100', '-', 'toggleGrid', 'gridSettings', 'toggleTileMode', 'toggleChecker', 'toggleShowPivot', '-', 'toggleSymX', 'toggleSymY', '-', 'togglePanels', 'toggleTimeline']],
+    ['Claude', ['claude', '-', 'claudeDraw', 'claudeAnimate', 'claudeEdit', 'claudePalette', 'claudeReview', '-', 'copySpriteText', 'importSpriteText', '-', 'claudeSettings']],
     ['Help', ['shortcuts', 'about']],
   ];
 
@@ -3224,6 +3606,10 @@
   // Modals, toasts & form helpers
   // ===========================================================================
   const modalStack = [];
+  function closeTopModal() {
+    const m = modalStack[modalStack.length - 1];
+    if (m) m.close();
+  }
   function openModal({ title, body, buttons = [], width = 440, onCancel }) {
     closeMenus();
     const overlay = el('div', { class: 'modal-overlay' });
@@ -3350,62 +3736,6 @@
   // ===========================================================================
   // Dialogs
   // ===========================================================================
-  function newSpriteDialog() {
-    const name = textInput('untitled');
-    const w = numInput(32, 1, MAX_SIZE), h = numInput(32, 1, MAX_SIZE);
-    const presets = [[16, 16], [24, 24], [32, 32], [48, 48], [64, 64], [128, 128], [256, 256], [160, 144], [320, 180]];
-    const chips = el(
-      'div',
-      { class: 'chips' },
-      presets.map(([pw, ph]) =>
-        el(
-          'button',
-          {
-            type: 'button',
-            class: 'chip',
-            onclick: () => {
-              w.value = pw;
-              h.value = ph;
-            },
-          },
-          `${pw}×${ph}`
-        )
-      )
-    );
-    const bg = selectInput([['transparent', 'Transparent'], ['white', 'White'], ['black', 'Black'], ['primary', 'Primary color']], 'transparent');
-    openModal({
-      title: 'New Sprite',
-      body: el(
-        'div',
-        {},
-        field('Name', name),
-        row(field('Width', w), field('Height', h)),
-        chips,
-        field('Background', bg),
-        el('p', { class: 'field-hint' }, 'The current sprite will be replaced. Use File → Save Project first if you want to keep it.')
-      ),
-      buttons: [
-        { label: 'Cancel', cancel: true },
-        {
-          label: 'Create',
-          kind: 'primary',
-          onClick: (m) => {
-            const W = clamp(Math.round(+w.value) || 32, 1, MAX_SIZE), H = clamp(Math.round(+h.value) || 32, 1, MAX_SIZE);
-            const sp = createSprite(W, H, name.value.trim() || 'untitled');
-            const fill = { white: Color.pack(255, 255, 255), black: Color.pack(0, 0, 0), primary }[bg.value];
-            if (fill) {
-              sp.layers[0].name = 'Background';
-              sp.cels.set(celKey(sp.layers[0].id, sp.frames[0].id), new Uint32Array(W * H).fill(fill));
-            }
-            loadSprite(sp);
-            m.close();
-            toast(`Created ${W}×${H} sprite`, 'ok');
-          },
-        },
-      ],
-    });
-  }
-
   function resizeCanvasDialog() {
     const W = sprite.width, H = sprite.height;
     const w = numInput(W, 1, MAX_SIZE), h = numInput(H, 1, MAX_SIZE);
@@ -3687,6 +4017,72 @@
     });
   }
 
+  const ONCE_NAMES = /^(jump|attack|hurt|hit|death|die|dead|open|opening|close|closing|break|explode|shoot|fire|land|cast|spawn|pressed|highlighted|disabled|normal|full|half|empty)/i;
+  function tagDialog(tag) {
+    stopPlayback();
+    const n = sprite.frames.length;
+    let from = frameIndex, to = frameIndex;
+    if (tag) [from, to] = [tag.from, tag.to];
+    else if (frameRange) [from, to] = [Math.min(frameRange.a, frameRange.b), Math.max(frameRange.a, frameRange.b)];
+    const name = textInput(tag ? tag.name : uniqueTagName(sprite.tags.length ? 'anim' : 'idle'));
+    const fromIn = numInput(from + 1, 1, n), toIn = numInput(to + 1, 1, n);
+    let color = tag ? tag.color : nextTagColor();
+    const colors = el('div', { class: 'tag-colors' });
+    for (const c of TAG_COLORS) {
+      const b = el('button', { type: 'button', class: 'tag-color' + (c === color ? ' active' : ''), style: { '--c': c }, title: c });
+      b.addEventListener('click', () => {
+        color = c;
+        colors.querySelectorAll('.tag-color').forEach((x) => x.classList.toggle('active', x === b));
+      });
+      colors.append(b);
+    }
+    const loop = checkInput('Loop — Unity “Loop Time” (off for jump, attack, death…)', tag ? tag.loop : !ONCE_NAMES.test(name.value));
+    const pingpong = checkInput('Ping-pong — play forward then backward', tag ? !!tag.pingpong : false);
+    let loopTouched = !!tag;
+    loop.input.addEventListener('change', () => (loopTouched = true));
+    const suggest = el(
+      'div',
+      { class: 'chips' },
+      ['idle', 'walk', 'run', 'jump', 'fall', 'attack', 'hurt', 'death'].map((s) =>
+        el('button', { type: 'button', class: 'chip', onclick: () => { name.value = uniqueTagName(s); name.dispatchEvent(new Event('input')); } }, s)
+      )
+    );
+    name.addEventListener('input', () => {
+      if (!loopTouched) loop.input.checked = !ONCE_NAMES.test(name.value.trim());
+    });
+    openModal({
+      title: tag ? 'Edit Animation Tag' : 'New Animation Tag',
+      width: 440,
+      body: el(
+        'div',
+        {},
+        field('Name', name, 'Becomes the Unity animation clip / Animator state name.'),
+        suggest,
+        row(field('From frame', fromIn), field('To frame', toIn)),
+        field('Color', colors),
+        loop.node,
+        pingpong.node
+      ),
+      buttons: [
+        tag ? { label: 'Delete', kind: 'danger', left: true, onClick: (m) => { m.close(); deleteTag(tag.id); } } : null,
+        { label: 'Cancel', cancel: true },
+        {
+          label: tag ? 'Save' : 'Add Tag',
+          kind: 'primary',
+          onClick: (m) => {
+            const nm = name.value.trim().slice(0, 40);
+            if (!nm) {
+              toast('Give the tag a name', 'warn');
+              return;
+            }
+            m.close();
+            saveTag(tag, { name: nm, from: (+fromIn.value || 1) - 1, to: (+toIn.value || 1) - 1, color, loop: loop.input.checked, pingpong: pingpong.input.checked });
+          },
+        },
+      ].filter(Boolean),
+    });
+  }
+
   function openOnionSettings() {
     const mk = (label, key, min, max, suffix = '') => {
       const inp = el('input', { type: 'range', class: 'range', min, max, value: settings[key] });
@@ -3790,9 +4186,13 @@
       name: sprite.name,
       width: sprite.width,
       height: sprite.height,
-      layers: sprite.layers.map(({ id, name, visible, locked, opacity, blend }) => ({ id, name, visible, locked, opacity, blend })),
+      layers: sprite.layers.map(({ id, name, visible, locked, opacity, blend, guide }) => ({ id, name, visible, locked, opacity, blend, guide: !!guide })),
       frames: sprite.frames.map(({ id, duration }) => ({ id, duration })),
       cels,
+      tags: sprite.tags.map(({ name, from, to, color, loop, pingpong }) => ({ name, from, to, color, loop, pingpong: !!pingpong })),
+      pivot: { ...sprite.pivot },
+      unity: { ...sprite.unity, border: [...sprite.unity.border] },
+      template: sprite.template,
       activeLayerId,
       frameIndex,
       colors: { primary: Color.toHex(primary), secondary: Color.toHex(secondary) },
@@ -3811,11 +4211,38 @@
       locked: !!l.locked,
       opacity: clamp(Math.round(+l.opacity), 0, 100) || (l.opacity === 0 ? 0 : 100),
       blend: BLEND_OP[l.blend] ? l.blend : 'normal',
+      guide: !!l.guide,
     }));
     const frames = (Array.isArray(o.frames) ? o.frames : []).map((f) => ({ id: String(f.id || uid('F')), duration: clamp(Math.round(+f.duration) || 100, 10, 10000) }));
-    const sp = { name: String(o.name || 'untitled').slice(0, 80), width: W, height: H, layers, frames, cels: new Map() };
+    const sp = createSprite(W, H, String(o.name || 'untitled').slice(0, 80));
+    Object.assign(sp, { layers, frames });
     if (!layers.length) layers.push(makeLayer('Layer 1'));
     if (!frames.length) frames.push(makeFrame());
+    const n = frames.length;
+    sp.tags = (Array.isArray(o.tags) ? o.tags : [])
+      .map((t) => {
+        const from = clamp(Math.round(+t.from) || 0, 0, n - 1);
+        return {
+          id: uid('T'),
+          name: String(t.name || 'anim').slice(0, 40),
+          from,
+          to: clamp(Math.round(+t.to) || 0, from, n - 1),
+          color: /^#[0-9a-f]{6}$/i.test(t.color) ? t.color : TAG_COLORS[0],
+          loop: t.loop !== false,
+          pingpong: !!t.pingpong,
+        };
+      })
+      .sort((a, b) => a.from - b.from);
+    if (o.pivot && Number.isFinite(+o.pivot.x) && Number.isFinite(+o.pivot.y)) sp.pivot = { x: +o.pivot.x, y: +o.pivot.y };
+    if (o.unity && typeof o.unity === 'object') {
+      const u = o.unity;
+      sp.unity.ppu = clamp(Math.round(+u.ppu) || sp.unity.ppu, 1, 4096);
+      if (/^[0-9a-f]{32}$/.test(u.guid)) sp.unity.guid = u.guid;
+      if (Array.isArray(u.border) && u.border.length === 4) sp.unity.border = u.border.map((v) => clamp(Math.round(+v) || 0, 0, 4096));
+      if (['frames', 'tiles', 'single'].includes(u.kind)) sp.unity.kind = u.kind;
+      sp.unity.tile = clamp(Math.round(+u.tile) || 0, 0, 1024);
+    }
+    sp.template = typeof o.template === 'string' ? o.template.slice(0, 40) : null;
     const lids = new Set(layers.map((l) => l.id)), fids = new Set(frames.map((f) => f.id));
     for (const c of Array.isArray(o.cels) ? o.cels : []) {
       if (lids.has(c.layer) && fids.has(c.frame) && typeof c.data === 'string') sp.cels.set(celKey(c.layer, c.frame), Codec.decodePixels(c.data, W * H));
@@ -3838,6 +4265,8 @@
     lastPaint = null;
     S = null;
     drag = null;
+    activeTagId = null;
+    frameRange = null;
     resetHistory();
     dom.docName.value = sp.name;
     document.title = `${sp.name} — Pixeledit`;
@@ -4049,7 +4478,11 @@
   // ===========================================================================
   function exportDialog(format = 'png') {
     stopPlayback();
-    const st = { format, scale: settings.exportScale || 4, layout: 'horizontal', cols: Math.ceil(Math.sqrt(sprite.frames.length)), bg: 'transparent', bgColor: '#ffffff' };
+    const curTag = tagAt(frameIndex);
+    const st = { format, scale: settings.exportScale || 4, layout: 'horizontal', cols: Math.ceil(Math.sqrt(sprite.frames.length)), bg: 'transparent', bgColor: '#ffffff', range: 'all', frames: [] };
+    const range = selectInput([['all', `All frames (${sprite.frames.length})`], ...sprite.tags.map((t) => ['tag:' + t.id, `Tag “${t.name}” (${t.to - t.from + 1} frames)`])], curTag && format !== 'png' ? 'tag:' + curTag.id : 'all');
+    const rangeField = field('Frames', range);
+    rangeField.hidden = !sprite.tags.length;
     const fmt = segmented([['png', 'PNG image'], ['sheet', 'Spritesheet'], ['gif', 'Animated GIF']], st.format, (v) => { st.format = v; update(); });
     const scale = selectInput([1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32].map((s) => [s, s + '×']), st.scale);
     const layout = selectInput([['horizontal', 'Horizontal strip'], ['vertical', 'Vertical strip'], ['grid', 'Grid']], st.layout);
@@ -4063,7 +4496,7 @@
     const bgColorField = field('Color', bgColor);
     const gifRow = row(field('Background', bg), bgColorField);
     function dims() {
-      const W = sprite.width * st.scale, H = sprite.height * st.scale, n = sprite.frames.length;
+      const W = sprite.width * st.scale, H = sprite.height * st.scale, n = st.frames.length;
       if (st.format === 'sheet') {
         const c = st.layout === 'horizontal' ? n : st.layout === 'vertical' ? 1 : Math.min(st.cols, n);
         return [W * c, H * Math.ceil(n / c)];
@@ -4076,21 +4509,27 @@
       st.cols = clamp(Math.round(+cols.value) || 1, 1, 256);
       st.bg = bg.value;
       st.bgColor = bgColor.value;
+      st.range = range.value;
+      const tg = sprite.tags.find((t) => 'tag:' + t.id === st.range);
+      st.frames = tg ? Array.from({ length: tg.to - tg.from + 1 }, (_, k) => tg.from + k) : sprite.frames.map((_, i) => i);
+      st.tagName = tg ? tg.name : '';
+      rangeField.hidden = !sprite.tags.length || st.format === 'png';
       sheetRow.hidden = st.format !== 'sheet';
       colsField.hidden = st.layout !== 'grid';
       gifRow.hidden = st.format !== 'gif';
       bgColorField.hidden = st.bg !== 'color';
       const [w, h] = dims();
-      const n = sprite.frames.length;
+      const n = st.frames.length;
       const what = st.format === 'png' ? `frame ${frameIndex + 1}` : `${n} frame${n > 1 ? 's' : ''}`;
       const big = w > 16384 || h > 16384 || w * h > 100e6;
       info.replaceChildren(icon('info'), el('span', {}, `${w}×${h} px · ${what}`), ...(big ? [el('strong', { class: 'warn-text' }, '— too large, lower the scale')] : []));
     }
-    [scale, layout, cols, bg, bgColor].forEach((n) => n.addEventListener('input', update));
+    [scale, layout, cols, bg, bgColor, range].forEach((n) => n.addEventListener('input', update));
+    const unityTip = el('button', { type: 'button', class: 'unity-tip', onclick: () => { closeTopModal(); unityExportDialog(); } }, icon('cube'), el('span', {}, 'Making a Unity game? ', el('strong', {}, 'Export for Unity'), ' creates a sliced sprite sheet, animation clips and an Animator.'));
     openModal({
       title: 'Export',
       width: 500,
-      body: el('div', {}, field('Format', fmt.node), field('Scale', scale), sheetRow, gifRow, field('File name', name), info),
+      body: el('div', {}, unityTip, field('Format', fmt.node), rangeField, field('Scale', scale), sheetRow, gifRow, field('File name', name), info),
       buttons: [
         { label: 'Cancel', cancel: true },
         {
@@ -4107,7 +4546,7 @@
             persistSettings();
             m.close();
             try {
-              await doExport(st, safeFileName(name.value, 'sprite'));
+              await doExport(st, safeFileName(name.value, 'sprite') + (st.tagName && st.format !== 'png' ? '-' + safeFileName(st.tagName) : ''));
             } catch (err) {
               toast(err.message || 'Export failed', 'error', 4000);
             }
@@ -4142,12 +4581,14 @@
   }
 
   async function doExport(st, base) {
-    const W = sprite.width, H = sprite.height, s = st.scale, n = sprite.frames.length;
+    const W = sprite.width, H = sprite.height, s = st.scale;
+    const list = st.frames && st.frames.length ? st.frames : sprite.frames.map((_, i) => i);
+    const n = list.length;
     if (st.format === 'png') {
       const cv = el('canvas', { width: W * s, height: H * s });
       const ctx = cv.getContext('2d');
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(getComposite(frameIndex), 0, 0, W * s, H * s);
+      ctx.drawImage(getComposite(frameIndex, true), 0, 0, W * s, H * s);
       downloadBlob(await canvasToBlob(cv), `${base}.png`);
       toast(`Exported ${base}.png`, 'ok');
     } else if (st.format === 'sheet') {
@@ -4156,21 +4597,1110 @@
       const cv = el('canvas', { width: W * s * cols, height: H * s * rows });
       const ctx = cv.getContext('2d');
       ctx.imageSmoothingEnabled = false;
-      for (let i = 0; i < n; i++) ctx.drawImage(getComposite(i), (i % cols) * W * s, Math.floor(i / cols) * H * s, W * s, H * s);
+      list.forEach((fi, i) => ctx.drawImage(getComposite(fi, true), (i % cols) * W * s, Math.floor(i / cols) * H * s, W * s, H * s));
       downloadBlob(await canvasToBlob(cv), `${base}-sheet.png`);
       toast(`Exported ${n}-frame spritesheet`, 'ok');
     } else {
       toast('Encoding GIF…', 'info', 1200);
       await new Promise((r) => setTimeout(r, 30));
-      const frames = sprite.frames.map((f, i) => {
-        let px = compositePixels(i);
+      const frames = list.map((fi) => {
+        let px = compositePixels(fi, true);
         if (st.bg === 'color') px = flattenOnto(px, st.bgColor);
-        return { data: upscalePixels(px, W, H, s), delay: f.duration };
+        return { data: upscalePixels(px, W, H, s), delay: sprite.frames[fi].duration };
       });
       const bytes = GifEncoder.encode({ width: W * s, height: H * s, frames, transparent: st.bg !== 'color', loop: true });
       downloadBlob(new Blob([bytes], { type: 'image/gif' }), `${base}.gif`);
       toast(`Exported ${base}.gif (${(bytes.length / 1024).toFixed(1)} KB)`, 'ok');
     }
+  }
+
+  // ===========================================================================
+  // Game templates
+  // ===========================================================================
+  const BLANK_TEMPLATE = { id: 'blank', category: 'blank', name: 'Blank sprite', desc: 'An empty canvas of any size.', w: 32, h: 32, pivot: 'center' };
+
+  function templateThumb(t, size = 88) {
+    const cv = el('canvas', { class: 'tpl-thumb', width: size, height: size });
+    const ctx = cv.getContext('2d');
+    let s = Math.min((size - 8) / t.w, (size - 8) / t.h);
+    if (s >= 1) s = Math.floor(s);
+    const dw = Math.max(1, Math.round(t.w * s)), dh = Math.max(1, Math.round(t.h * s));
+    const x = Math.floor((size - dw) / 2), y = Math.floor((size - dh) / 2);
+    ctx.fillStyle = '#2b2d39';
+    ctx.fillRect(x, y, dw, dh);
+    if (t.guide) {
+      const g = makeGuidePainter(t.w, t.h);
+      t.guide(g);
+      const boosted = new Uint32Array(g.buf.length);
+      for (let i = 0; i < g.buf.length; i++) {
+        const c = g.buf[i];
+        if (c >>> 24) boosted[i] = (c & 0x00ffffff) | (Math.min(255, Math.round((c >>> 24) * 2.2)) << 24);
+      }
+      const tmp = el('canvas', { width: t.w, height: t.h });
+      tmp.getContext('2d').putImageData(toImageData(boosted, t.w, t.h), 0, 0);
+      ctx.imageSmoothingEnabled = s < 1;
+      ctx.drawImage(tmp, x, y, dw, dh);
+    }
+    return cv;
+  }
+
+  function spriteFromTemplate(t, name, ppu) {
+    const W = t.w, H = t.h;
+    const sp = createSprite(W, H, name);
+    sp.template = t.id;
+    sp.unity.ppu = clamp(Math.round(+ppu) || 16, 1, 4096);
+    sp.unity.kind = t.kind || null;
+    sp.unity.tile = t.tile || 0;
+    if (t.border) sp.unity.border = [...t.border];
+    sp.pivot = templatePivot(t, W, H);
+    sp.frames = [];
+    (t.tags || []).forEach(([tname, count, ms, loop, pingpong], i) => {
+      const from = sp.frames.length;
+      for (let k = 0; k < count; k++) sp.frames.push(makeFrame(ms));
+      sp.tags.push({ id: uid('T'), name: tname, from, to: sp.frames.length - 1, color: TAG_COLORS[i % TAG_COLORS.length], loop: !!loop, pingpong: !!pingpong });
+    });
+    if (!sp.frames.length) sp.frames.push(makeFrame(100));
+    const layers = (t.layers || ['Layer 1']).map((n) => makeLayer(n));
+    if (t.guide) {
+      const guide = makeLayer('Guide');
+      guide.guide = true;
+      guide.locked = true;
+      const g = makeGuidePainter(W, H);
+      t.guide(g);
+      for (const f of sp.frames) sp.cels.set(celKey(guide.id, f.id), g.buf.slice());
+      layers.unshift(guide);
+    }
+    sp.layers = layers;
+    return sp;
+  }
+
+  /** Loads a sprite made from a template and applies the template's view settings. */
+  function loadTemplateSprite(t, sp) {
+    settings.tileGrid = t.tile || 0;
+    settings.tileMode = !!(t.view && t.view.tileMode);
+    persistSettings();
+    loadSprite(sp);
+    if (t.guide) activeLayerId = artLayers()[0].id;
+    refreshLayers();
+    refreshOptions();
+  }
+
+  function newSpriteDialog(category) {
+    let cat = category || (sprite && sprite.template ? (TEMPLATES.find((t) => t.id === sprite.template) || {}).category : null) || 'character';
+    let chosen = null;
+    const cats = el('nav', { class: 'tpl-cats' });
+    const grid = el('div', { class: 'tpl-grid' });
+    const detail = el('div', { class: 'tpl-detail' });
+    const name = textInput('untitled');
+    const ppu = numInput(settings.unityPPU, 1, 4096);
+    const w = numInput(32, 1, MAX_SIZE), h = numInput(32, 1, MAX_SIZE);
+    const bg = selectInput([['transparent', 'Transparent'], ['white', 'White'], ['black', 'Black'], ['primary', 'Primary color']], 'transparent');
+    const presets = el(
+      'div',
+      { class: 'chips' },
+      [[16, 16], [24, 24], [32, 32], [48, 48], [64, 64], [128, 128], [256, 256], [320, 180], [480, 270]].map(([pw, ph]) =>
+        el('button', { type: 'button', class: 'chip', onclick: () => { w.value = pw; h.value = ph; } }, `${pw}×${ph}`)
+      )
+    );
+    const blankFields = el('div', {}, row(field('Width', w), field('Height', h)), presets, field('Background', bg));
+    const nameRow = row(field('Name', name), field('Pixels per unit (Unity)', ppu));
+
+    function renderCats() {
+      cats.replaceChildren(
+        ...TEMPLATE_CATEGORIES.map(([id, label]) =>
+          el('button', { type: 'button', class: 'tpl-cat' + (id === cat ? ' active' : ''), onclick: () => { cat = id; renderCats(); renderGrid(); } }, label)
+        )
+      );
+    }
+    function renderGrid() {
+      const list = cat === 'blank' ? [BLANK_TEMPLATE] : TEMPLATES.filter((t) => t.category === cat);
+      grid.replaceChildren(
+        ...list.map((t) => {
+          const frames = (t.tags || []).reduce((a, x) => a + x[1], 0) || 1;
+          const card = el(
+            'button',
+            { type: 'button', class: 'tpl-card', dataset: { id: t.id }, onclick: () => choose(t), ondblclick: () => { choose(t); create(); } },
+            templateThumb(t),
+            el('span', { class: 'tpl-name' }, t.name),
+            el('span', { class: 'tpl-meta' }, t.id === 'blank' ? 'Any size' : `${t.w}×${t.h}${frames > 1 ? ` · ${frames} frames` : ''}`)
+          );
+          return card;
+        })
+      );
+      choose(list.includes(chosen) ? chosen : list[0]);
+    }
+    function choose(t) {
+      chosen = t;
+      grid.querySelectorAll('.tpl-card').forEach((c) => c.classList.toggle('active', c.dataset.id === t.id));
+      if (t.ppu) ppu.value = t.ppu;
+      else ppu.value = settings.unityPPU;
+      if (name.value === 'untitled' || TEMPLATES.some((x) => x.name.toLowerCase().replace(/[^a-z0-9]+/g, '_') === name.value)) {
+        name.value = t.id === 'blank' ? 'untitled' : t.name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+      }
+      const tags = (t.tags || []).map(([n, c, ms, loop]) => el('span', { class: 'tpl-tag', title: `${c} frame${c > 1 ? 's' : ''} · ${ms} ms · ${loop ? 'loops' : 'plays once'}` }, `${n} ${c}`));
+      const pv = templatePivot(t, t.w, t.h);
+      const facts = [];
+      if (t.id !== 'blank') {
+        facts.push(`${t.w}×${t.h} px`);
+        facts.push(`pivot ${t.pivot === 'bottom' ? 'bottom centre' : t.pivot === 'center' ? 'centre' : `(${pv.x}, ${pv.y})`}`);
+        if (t.kind === 'tiles') facts.push(`${t.tile}px tiles`);
+        if (t.border) facts.push('9-slice borders');
+        if (t.guide) facts.push('guide layer');
+        if (t.perLayer) facts.push('export per layer');
+      }
+      detail.replaceChildren(
+        ...[
+          el('h3', {}, t.name),
+          el('p', { class: 'muted' }, t.desc),
+          facts.length ? el('p', { class: 'tpl-facts' }, facts.join(' · ')) : null,
+          tags.length ? el('div', { class: 'tpl-tags' }, tags) : null,
+          t.hint ? el('p', { class: 'tpl-hint' }, icon('info'), el('span', {}, t.hint)) : null,
+          nameRow,
+          t.id === 'blank' ? blankFields : null,
+          el('p', { class: 'field-hint' }, 'Use the same pixels-per-unit for every sprite in your game — usually your tile size. Creating a sprite replaces the current one, so save it first (File → Save Project) if you want to keep it.'),
+        ].filter(Boolean)
+      );
+    }
+    let modal = null;
+    function create() {
+      const t = chosen;
+      const nm = name.value.trim() || 'untitled';
+      const p = clamp(Math.round(+ppu.value) || 16, 1, 4096);
+      settings.unityPPU = t.ppu ? settings.unityPPU : p;
+      let sp;
+      if (t.id === 'blank') {
+        const W = clamp(Math.round(+w.value) || 32, 1, MAX_SIZE), H = clamp(Math.round(+h.value) || 32, 1, MAX_SIZE);
+        sp = createSprite(W, H, nm);
+        sp.unity.ppu = p;
+        const fill = { white: Color.pack(255, 255, 255), black: Color.pack(0, 0, 0), primary }[bg.value];
+        if (fill) {
+          sp.layers[0].name = 'Background';
+          sp.cels.set(celKey(sp.layers[0].id, sp.frames[0].id), new Uint32Array(W * H).fill(fill));
+        }
+      } else {
+        sp = spriteFromTemplate(t, nm, p);
+      }
+      persistSettings();
+      if (modal) modal.close();
+      if (t.id === 'blank') loadSprite(sp);
+      else loadTemplateSprite(t, sp);
+      toast(t.id === 'blank' ? `Created ${sp.width}×${sp.height} sprite` : `${t.name}: ${t.hint || 'ready'}`, 'ok', t.hint ? 6000 : 2400);
+    }
+    renderCats();
+    renderGrid();
+    modal = openModal({
+      title: 'New Sprite',
+      width: 900,
+      body: el('div', { class: 'tpl-dialog' }, cats, el('div', { class: 'tpl-main' }, grid, detail)),
+      buttons: [
+        { label: 'Cancel', cancel: true },
+        { label: 'Create', kind: 'primary', onClick: create },
+      ],
+    });
+  }
+
+  // ===========================================================================
+  // Unity
+  // ===========================================================================
+  function unitySettingsDialog() {
+    const u = sprite.unity;
+    const ppu = numInput(u.ppu, 1, 4096);
+    const b = u.border;
+    const bl = numInput(b[0], 0, sprite.width), bb = numInput(b[1], 0, sprite.height), br = numInput(b[2], 0, sprite.width), bt = numInput(b[3], 0, sprite.height);
+    const pv = selectInput(
+      [['keep', `Keep (${sprite.pivot.x}, ${sprite.pivot.y})`], ['c', 'Center'], ['b', 'Bottom center (feet)'], ['bl', 'Bottom left'], ['tl', 'Top left'], ['t', 'Top center']],
+      'keep'
+    );
+    const asDefault = checkInput('Use this PPU for new sprites', u.ppu === settings.unityPPU);
+    openModal({
+      title: 'Unity Sprite Settings',
+      width: 460,
+      body: el(
+        'div',
+        {},
+        field('Pixels per unit', ppu, `This sprite is ${+(sprite.width / u.ppu).toFixed(3)} × ${+(sprite.height / u.ppu).toFixed(3)} Unity units. Keep one PPU for the whole game.`),
+        asDefault.node,
+        field('Pivot', pv, 'Or use the Pivot tool (P) to click it into place.'),
+        el('div', { class: 'field-label' }, '9-slice border (px) — for UI panels and stretchable sprites'),
+        row(field('Left', bl), field('Right', br)),
+        row(field('Top', bt), field('Bottom', bb))
+      ),
+      buttons: [
+        { label: 'Cancel', cancel: true },
+        {
+          label: 'Apply',
+          kind: 'primary',
+          onClick: (m) => {
+            u.ppu = clamp(Math.round(+ppu.value) || 16, 1, 4096);
+            if (asDefault.input.checked) settings.unityPPU = u.ppu;
+            u.border = [bl, bb, br, bt].map((n, i) => clamp(Math.round(+n.value) || 0, 0, i % 2 ? sprite.height : sprite.width));
+            persistSettings();
+            m.close();
+            if (pv.value !== 'keep') {
+              const p = pivotPreset(pv.value);
+              setPivot(p.x, p.y);
+            }
+            scheduleAutosave();
+            refreshStatus();
+            refreshOptions();
+            requestRender();
+          },
+        },
+      ],
+    });
+  }
+
+  const pivotPresetOr = (name) => (name === 'sprite' ? sprite.pivot : pivotPreset(name));
+
+  /** Pixels of a single layer in a frame, with the layer opacity applied. */
+  function layerPixels(layer, fi) {
+    const cel = getCel(layer.id, sprite.frames[fi].id);
+    if (!cel) return new Uint32Array(sprite.width * sprite.height);
+    if (layer.opacity >= 100) return cel;
+    const out = new Uint32Array(cel.length), k = layer.opacity / 100;
+    for (let i = 0; i < cel.length; i++) {
+      const c = cel[i];
+      if (c >>> 24) out[i] = (c & 0x00ffffff) | (Math.round((c >>> 24) * k) << 24);
+    }
+    return out;
+  }
+
+  /** Works out textures, sprite rects and clips for a Unity export (no encoding yet). */
+  function planUnityExport(o) {
+    const W = sprite.width, H = sprite.height, n = sprite.frames.length;
+    const base = UnityExport.safeName(o.name, 'sprite');
+    const layers = artLayers().filter((l) => l.visible);
+    const groups = o.perLayer && layers.length > 1 ? layers.map((l) => ({ layer: l, texName: base + '_' + UnityExport.safeName(l.name, 'layer') })) : [{ layer: null, texName: base }];
+    const pv = pivotPresetOr(o.pivot);
+    const pivot = [pv.x / W, 1 - pv.y / H];
+    const border = o.kind === 'tiles' ? [0, 0, 0, 0] : sprite.unity.border;
+    const used = new Set();
+    const stateName = (s) => {
+      let nm = UnityExport.safeName(s, 'anim'), k = 2;
+      while (used.has(nm)) nm = UnityExport.safeName(s, 'anim') + k++;
+      used.add(nm);
+      return nm;
+    };
+    const tagDefs = sprite.tags.length ? sprite.tags : [{ name: 'anim', from: 0, to: n - 1, loop: true, pingpong: false }];
+    const clipNames = o.kind === 'frames' && o.clips && n > 1 ? tagDefs.map((t) => ({ tag: t, state: stateName(t.name) })) : [];
+    return groups.map((g) => {
+      const pixels = (fi) => (g.layer ? layerPixels(g.layer, fi) : compositePixels(fi, true));
+      const plan = { ...g, pixels, sprites: [], place: [], clips: [], texW: W, texH: H };
+      if (o.kind === 'tiles') {
+        const ts = clamp(o.tile | 0, 1, Math.min(W, H));
+        const tc = Math.floor(W / ts), tr = Math.floor(H / ts);
+        plan.texW = W * n;
+        plan.texH = H;
+        for (let fi = 0; fi < n; fi++) {
+          plan.place.push([fi, fi * W, 0]);
+          const px = o.skipEmpty ? pixels(fi) : null;
+          for (let ty = 0; ty < tr; ty++) {
+            for (let tx = 0; tx < tc; tx++) {
+              if (px) {
+                let empty = true;
+                for (let y = ty * ts; y < ty * ts + ts && empty; y++) for (let x = tx * ts; x < tx * ts + ts; x++) if (px[y * W + x] >>> 24) { empty = false; break; }
+                if (empty) continue;
+              }
+              const k = ty * tc + tx;
+              plan.sprites.push({ name: n > 1 ? `${g.texName}_${fi}_${k}` : `${g.texName}_${k}`, x: fi * W + tx * ts, y: ty * ts, w: ts, h: ts, pivot: [0.5, 0.5], border });
+            }
+          }
+        }
+      } else if (o.kind === 'single' || n === 1) {
+        plan.place.push([o.kind === 'single' ? frameIndex : 0, 0, 0]);
+        plan.sprites.push({ name: g.texName, x: 0, y: 0, w: W, h: H, pivot, border });
+      } else {
+        const pad = o.padding | 0;
+        const cols = o.layout === 'row' ? n : Math.ceil(Math.sqrt(n));
+        const rows = Math.ceil(n / cols);
+        plan.texW = cols * W + (cols - 1) * pad;
+        plan.texH = rows * H + (rows - 1) * pad;
+        for (let i = 0; i < n; i++) {
+          const x = (i % cols) * (W + pad), y = Math.floor(i / cols) * (H + pad);
+          plan.place.push([i, x, y]);
+          plan.sprites.push({ name: `${g.texName}_${i}`, x, y, w: W, h: H, pivot, border });
+        }
+        plan.clips = clipNames.map(({ tag, state }) => {
+          const idx = [];
+          for (let i = tag.from; i <= tag.to; i++) idx.push(i);
+          if (tag.pingpong) for (let i = tag.to - 1; i > tag.from; i--) idx.push(i);
+          return { name: `${g.texName}_${state}`, state, frames: idx, loop: tag.loop };
+        });
+      }
+      return plan;
+    });
+  }
+
+  async function buildUnityZip(o) {
+    const u = sprite.unity;
+    const W = sprite.width, H = sprite.height;
+    const base = UnityExport.safeName(o.name, 'sprite');
+    const folder = base + '/';
+    const plans = planUnityExport(o);
+    const files = [];
+    const summary = [];
+    for (const p of plans) {
+      const texGuid = p.layer ? UnityExport.guidFrom(u.guid + ':' + p.texName) : u.guid;
+      const cv = el('canvas', { width: p.texW, height: p.texH });
+      const ctx = cv.getContext('2d');
+      const tmp = el('canvas', { width: W, height: H });
+      const tctx = tmp.getContext('2d');
+      for (const [fi, x, y] of p.place) {
+        tctx.clearRect(0, 0, W, H);
+        tctx.putImageData(toImageData(p.pixels(fi), W, H), 0, 0);
+        ctx.drawImage(tmp, x, y);
+      }
+      const png = new Uint8Array(await (await canvasToBlob(cv)).arrayBuffer());
+      const meta = UnityExport.textureMeta({ guid: texGuid, ppu: u.ppu, texW: p.texW, texH: p.texH, sprites: p.sprites });
+      files.push({ name: `${folder}${p.texName}.png`, data: png }, { name: `${folder}${p.texName}.png.meta`, data: meta.text });
+      const states = [];
+      for (const c of p.clips) {
+        const animGuid = UnityExport.guidFrom(u.guid + ':anim:' + c.name);
+        const clip = UnityExport.animClip({
+          name: c.name,
+          texGuid,
+          loop: c.loop,
+          frames: c.frames.map((fi) => ({ id: meta.ids[fi], duration: sprite.frames[fi].duration })),
+        });
+        files.push({ name: `${folder}Animations/${c.name}.anim`, data: clip }, { name: `${folder}Animations/${c.name}.anim.meta`, data: UnityExport.nativeMeta(animGuid, 7400000) });
+        states.push({ name: c.state, animGuid });
+      }
+      if (o.controller && states.length) {
+        const ctrlGuid = UnityExport.guidFrom(u.guid + ':controller:' + p.texName);
+        files.push(
+          { name: `${folder}${p.texName}.controller`, data: UnityExport.controller({ name: p.texName, seed: u.guid + ':' + p.texName, states }) },
+          { name: `${folder}${p.texName}.controller.meta`, data: UnityExport.nativeMeta(ctrlGuid, 9100000) }
+        );
+      }
+      if (o.json) files.push({ name: `${folder}${p.texName}.json`, data: JSON.stringify(asepriteJson(p), null, 2) });
+      summary.push({ texName: p.texName, texW: p.texW, texH: p.texH, sprites: p.sprites.length, clips: p.clips.map((c) => c.state), controller: o.controller && states.length > 0 });
+    }
+    files.push({ name: `${folder}README.txt`, data: unityReadme(base, summary, o) });
+    return { blob: Zip.build(files), summary, files };
+  }
+
+  function asepriteJson(p) {
+    const frames = {};
+    p.sprites.forEach((s, i) => {
+      frames[s.name] = {
+        frame: { x: s.x, y: s.y, w: s.w, h: s.h },
+        rotated: false,
+        trimmed: false,
+        spriteSourceSize: { x: 0, y: 0, w: s.w, h: s.h },
+        sourceSize: { w: s.w, h: s.h },
+        duration: p.place.length === p.sprites.length ? sprite.frames[p.place[i][0]].duration : 100,
+      };
+    });
+    return {
+      frames,
+      meta: {
+        app: 'https://github.com/adityajhagaming123-droid/pixel-editor',
+        version: '2',
+        image: p.texName + '.png',
+        format: 'RGBA8888',
+        size: { w: p.texW, h: p.texH },
+        scale: '1',
+        pixelsPerUnit: sprite.unity.ppu,
+        pivot: { x: sprite.pivot.x, y: sprite.pivot.y },
+        frameTags: sprite.tags.map((t) => ({ name: t.name, from: t.from, to: t.to, direction: t.pingpong ? 'pingpong' : 'forward', repeat: t.loop ? undefined : '1', color: t.color })),
+      },
+    };
+  }
+
+  function unityReadme(base, summary, o) {
+    const lines = [
+      `${base} — exported from Pixeledit for Unity`,
+      '',
+      'HOW TO IMPORT',
+      `1. Unzip and drag the "${base}" folder into your Unity project's Assets folder.`,
+      '2. The PNG files import as ready-to-use sprites: Point (no filter) filtering, no compression,',
+      `   no mipmaps, ${sprite.unity.ppu} pixels per unit, pivots${o.kind === 'tiles' ? '' : ' and 9-slice borders'} already set.`,
+      '',
+    ];
+    for (const s of summary) {
+      lines.push(`${s.texName}.png — ${s.texW}×${s.texH}, ${s.sprites} sprite${s.sprites === 1 ? '' : 's'}`);
+      if (s.clips.length) lines.push(`  Animation clips (Animations/): ${s.clips.join(', ')}`);
+      if (s.controller) lines.push(`  Animator controller: ${s.texName}.controller (one state per clip)`);
+    }
+    lines.push('');
+    if (summary.some((s) => s.controller)) {
+      lines.push(
+        'USING THE ANIMATIONS',
+        '- Add a SpriteRenderer and an Animator to your GameObject and assign the .controller.',
+        '- The first clip is the default state. Switch clips from a script, for example:',
+        '      GetComponent<Animator>().Play("run");',
+        '- Or open the controller in the Animator window and add transitions between the states.',
+        '- Clips without "Loop Time" (jump, attack, death…) play once and hold their last frame.',
+        ''
+      );
+    }
+    if (o.kind === 'tiles') {
+      lines.push('TILES', '- Open Window > 2D > Tile Palette, create a palette and drag the PNG onto it to create tiles.', `- With ${sprite.unity.ppu} PPU each ${o.tile}px tile is ${+(o.tile / sprite.unity.ppu).toFixed(3)} unit(s); set the Grid cell size to match.`, '');
+    }
+    lines.push('Re-exporting later keeps the same GUIDs and sprite IDs, so replacing the files updates your scenes and prefabs in place.', '');
+    return lines.join('\n');
+  }
+
+  function unityExportDialog() {
+    stopPlayback();
+    const u = sprite.unity;
+    const ue = settings.unityExport;
+    const n = sprite.frames.length;
+    const defaultKind = u.kind || (n > 1 ? 'frames' : 'single');
+    const o = { name: UnityExport.safeName(sprite.name, 'sprite'), kind: defaultKind, tile: u.tile || settings.tileGrid || u.ppu, pivot: 'sprite', perLayer: false, ...ue };
+    o.kind = defaultKind;
+    const t = TEMPLATES.find((x) => x.id === sprite.template);
+    if (t && t.perLayer) o.perLayer = true;
+    const name = textInput(o.name);
+    const kind = segmented([['frames', 'Animation frames'], ['tiles', 'Tile grid'], ['single', 'Single sprite']], o.kind, (v) => { o.kind = v; update(); });
+    const ppu = numInput(u.ppu, 1, 4096);
+    const tile = numInput(o.tile, 1, MAX_SIZE);
+    const pivot = selectInput([['sprite', `Sprite pivot (${sprite.pivot.x}, ${sprite.pivot.y})`], ['c', 'Center'], ['b', 'Bottom center'], ['bl', 'Bottom left'], ['tl', 'Top left']], 'sprite');
+    const layout = selectInput([['grid', 'Grid (square-ish)'], ['row', 'Single row']], o.layout);
+    const padding = selectInput([[0, 'None'], [1, '1 px'], [2, '2 px']], o.padding);
+    const clips = checkInput('Animation clips (.anim) — one per tag', o.clips);
+    const controller = checkInput('Animator controller with a state per clip', o.controller);
+    const perLayer = checkInput('Each layer as its own sprite (parallax, separate parts)', o.perLayer);
+    const skipEmpty = checkInput('Skip empty tiles', o.skipEmpty);
+    const json = checkInput('JSON data (Aseprite format, for other engines)', o.json);
+    const info = el('div', { class: 'unity-info' });
+    const tileField = field('Tile size (px)', tile);
+    const frameRow = row(field('Sheet layout', layout), field('Padding', padding));
+    const multiLayer = artLayers().filter((l) => l.visible).length > 1;
+    function read() {
+      o.name = UnityExport.safeName(name.value, 'sprite');
+      o.tile = clamp(Math.round(+tile.value) || 16, 1, MAX_SIZE);
+      o.pivot = pivot.value;
+      o.layout = layout.value;
+      o.padding = +padding.value;
+      o.clips = clips.input.checked;
+      o.controller = clips.input.checked && controller.input.checked;
+      o.perLayer = multiLayer && perLayer.input.checked;
+      o.skipEmpty = skipEmpty.input.checked;
+      o.json = json.input.checked;
+    }
+    function update() {
+      read();
+      tileField.hidden = o.kind !== 'tiles';
+      skipEmpty.node.hidden = o.kind !== 'tiles';
+      frameRow.hidden = o.kind !== 'frames';
+      clips.node.hidden = controller.node.hidden = o.kind !== 'frames';
+      controller.input.disabled = !clips.input.checked;
+      perLayer.node.hidden = !multiLayer;
+      pivot.closest('.field').hidden = o.kind === 'tiles';
+      const plans = planUnityExport(o);
+      const lines = plans.map((p) => {
+        const clipList = p.clips.map((c) => c.state).join(', ');
+        return el('li', {}, el('strong', {}, p.texName + '.png'), ` ${p.texW}×${p.texH} · ${p.sprites.length} sprite${p.sprites.length === 1 ? '' : 's'}`, clipList ? el('span', { class: 'muted' }, ` · clips: ${clipList}`) : null);
+      });
+      const warn = [];
+      if (o.kind === 'tiles' && (sprite.width % o.tile || sprite.height % o.tile)) warn.push(`The canvas is not a multiple of ${o.tile}px — partial tiles at the edges are skipped.`);
+      if (o.kind === 'frames' && n === 1) warn.push('Only one frame — it will be exported as a single sprite.');
+      if (o.kind === 'frames' && n > 1 && !sprite.tags.length && o.clips) warn.push('No animation tags yet: all frames become one clip called “anim”. Add tags (Frame → New Animation Tag) for idle, run…');
+      if (o.kind === 'single' && n > 1) warn.push(`Exports the current frame (${frameIndex + 1}) only.`);
+      const b = sprite.unity.border;
+      const notes = [];
+      if (o.kind !== 'tiles' && b.some((v) => v > 0)) notes.push(`9-slice border: left ${b[0]}, right ${b[2]}, top ${b[3]}, bottom ${b[1]} px (File → Unity Sprite Settings)`);
+      if (o.kind !== 'tiles') notes.push(`Pivot in Unity: (${+(pivotPresetOr(o.pivot).x / sprite.width).toFixed(3)}, ${+(1 - pivotPresetOr(o.pivot).y / sprite.height).toFixed(3)})`);
+      info.replaceChildren(el('ul', {}, lines), ...notes.map((t) => el('p', { class: 'muted' }, t)), ...warn.map((w) => el('p', { class: 'warn-text' }, w)));
+    }
+    [name, tile, pivot, layout, padding, clips.input, controller.input, perLayer.input, skipEmpty.input, json.input].forEach((x) => x.addEventListener('input', update));
+    [clips.input, controller.input, perLayer.input, skipEmpty.input, json.input].forEach((x) => x.addEventListener('change', update));
+    openModal({
+      title: 'Export for Unity',
+      width: 560,
+      body: el(
+        'div',
+        { class: 'unity-export' },
+        el('p', { class: 'muted small' }, 'Downloads a .zip with the sprite sheet PNG and Unity .meta files (Point filter, no compression, slicing, pivots), plus animation clips and an Animator controller. Guide layers are left out.'),
+        row(field('Name', name), field('Pixels per unit', ppu)),
+        field('Slice as', kind.node),
+        tileField,
+        field('Pivot', pivot),
+        frameRow,
+        el('div', { class: 'checks' }, clips.node, controller.node, perLayer.node, skipEmpty.node, json.node),
+        info
+      ),
+      buttons: [
+        { label: 'Cancel', cancel: true },
+        {
+          label: 'Download .zip',
+          kind: 'primary',
+          onClick: async (m) => {
+            read();
+            u.ppu = clamp(Math.round(+ppu.value) || 16, 1, 4096);
+            u.kind = o.kind;
+            if (o.kind === 'tiles') u.tile = o.tile;
+            settings.unityExport = { clips: o.clips, controller: controller.input.checked, json: o.json, layout: o.layout, padding: o.padding, skipEmpty: o.skipEmpty };
+            persistSettings();
+            scheduleAutosave();
+            refreshStatus();
+            const big = planUnityExport(o).some((p) => p.texW > 16384 || p.texH > 16384);
+            if (big) {
+              toast('The sprite sheet would be larger than 16384 px — use the grid layout or fewer frames', 'error', 5000);
+              return;
+            }
+            m.close();
+            try {
+              const res = await buildUnityZip(o);
+              downloadBlob(res.blob, `${o.name}_Unity.zip`);
+              toast(`Exported ${o.name}_Unity.zip — unzip it into your Unity Assets folder`, 'ok', 4500);
+            } catch (err) {
+              toast(err.message || 'Unity export failed', 'error', 5000);
+            }
+          },
+        },
+      ],
+    });
+    ppu.addEventListener('input', update);
+    update();
+  }
+
+  // ===========================================================================
+  // Claude assistant
+  // ===========================================================================
+  const claudeState = { sessionKey: '', busy: false, abort: null };
+  function claudeKey() {
+    if (claudeState.sessionKey) return claudeState.sessionKey;
+    const saved = readJSON(KEYS.claude, null);
+    return saved && typeof saved.key === 'string' ? saved.key : '';
+  }
+
+  function claudeKeyDialog(onSaved) {
+    const saved = readJSON(KEYS.claude, null);
+    const input = el('input', { type: 'password', class: 'input mono', value: claudeKey(), placeholder: 'sk-ant-…', autocomplete: 'off', spellcheck: 'false' });
+    const remember = checkInput('Remember the key in this browser', !!saved || !claudeKey());
+    openModal({
+      title: 'Claude API Key',
+      width: 480,
+      body: el(
+        'div',
+        {},
+        el('p', {}, 'To send requests straight from the editor, paste an Anthropic API key. Requests go directly from your browser to ', el('code', {}, 'api.anthropic.com'), ' and are billed to your Anthropic account.'),
+        field('API key', input),
+        remember.node,
+        el('p', { class: 'field-hint' }, 'Get a key at ', el('a', { href: 'https://console.anthropic.com/settings/keys', target: '_blank', rel: 'noopener' }, 'console.anthropic.com'), '. Without a key you can still use Claude: copy the prompt into claude.ai and paste the reply back.')
+      ),
+      buttons: [
+        claudeKey() ? { label: 'Remove key', kind: 'danger', left: true, onClick: (m) => { claudeState.sessionKey = ''; try { localStorage.removeItem(KEYS.claude); } catch (_) { /* ignore */ } m.close(); toast('API key removed'); if (onSaved) onSaved(); } } : null,
+        { label: 'Cancel', cancel: true },
+        {
+          label: 'Save',
+          kind: 'primary',
+          onClick: (m) => {
+            const key = input.value.trim();
+            if (!key) {
+              toast('Paste a key first', 'warn');
+              return;
+            }
+            claudeState.sessionKey = key;
+            if (remember.input.checked) writeJSON(KEYS.claude, { key });
+            else {
+              try {
+                localStorage.removeItem(KEYS.claude);
+              } catch (_) { /* ignore */ }
+            }
+            m.close();
+            toast('API key saved', 'ok');
+            if (onSaved) onSaved();
+          },
+        },
+      ].filter(Boolean),
+    });
+  }
+
+  function claudeContext() {
+    const t = TEMPLATES.find((x) => x.id === sprite.template);
+    const parts = [];
+    if (t && t.ai) parts.push(t.ai);
+    if (sprite.name && sprite.name !== 'untitled') parts.push(`the sprite is called "${sprite.name}"`);
+    if (!t && sprite.pivot.y === sprite.height) parts.push('the pivot is at the bottom, so it stands on the bottom row');
+    return parts.join('; ');
+  }
+
+  function firstNonEmptyFrame(prefer) {
+    const order = [prefer, ...sprite.frames.map((_, i) => i)].filter((i) => i >= 0 && i < sprite.frames.length);
+    for (const i of order) if (!isEmptyBuffer(compositePixels(i, true))) return i;
+    return -1;
+  }
+
+  /** PNG (base64) of frames side by side, scaled up on a light background so outlines stay visible. */
+  function framesImageB64(list) {
+    const W = sprite.width, H = sprite.height, gap = list.length > 1 ? 2 : 0;
+    const s = clamp(Math.floor(768 / Math.max(W * list.length, H)), 1, 16);
+    const cv = el('canvas', { width: (W * list.length + gap * (list.length - 1)) * s, height: H * s });
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#c9ccd8';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.imageSmoothingEnabled = false;
+    list.forEach((fi, k) => ctx.drawImage(getComposite(fi, true), k * (W + gap) * s, 0, W * s, H * s));
+    return cv.toDataURL('image/png').split(',')[1];
+  }
+
+  /** Places pixels of another size into the canvas (centred; bottom-aligned when the pivot is at the bottom). */
+  function fitPixels(px, w, h) {
+    const W = sprite.width, H = sprite.height;
+    if (w === W && h === H) return px;
+    const out = new Uint32Array(W * H);
+    const dx = Math.floor((W - w) / 2);
+    const dy = sprite.pivot.y >= H ? H - h : Math.floor((H - h) / 2);
+    for (let y = 0; y < h; y++) {
+      const ty = y + dy;
+      if (ty < 0 || ty >= H) continue;
+      for (let x = 0; x < w; x++) {
+        const tx = x + dx;
+        if (tx >= 0 && tx < W) out[ty * W + tx] = px[y * w + x];
+      }
+    }
+    return out;
+  }
+
+  function uniqueLayerName(base) {
+    const names = new Set(sprite.layers.map((l) => l.name));
+    if (!names.has(base)) return base;
+    let i = 2;
+    while (names.has(`${base} ${i}`)) i++;
+    return `${base} ${i}`;
+  }
+
+  /** The art layer results are written to (never a guide layer). */
+  function resultLayer() {
+    const l = activeLayer();
+    if (l && !l.guide) return l;
+    const art = artLayers();
+    if (art.length) return art[art.length - 1];
+    const nl = makeLayer(nextLayerName());
+    sprite.layers.push(nl);
+    return nl;
+  }
+
+  function copyGuideCels(fromFrameId, toFrameId) {
+    for (const l of sprite.layers) {
+      if (!l.guide) continue;
+      const c = getCel(l.id, fromFrameId);
+      if (c) sprite.cels.set(celKey(l.id, toFrameId), c.slice());
+    }
+  }
+
+  /** Applies parsed sprite text. info: { task, place, target, tagId, tagName, loop, duration, label } */
+  function applySpriteResult(parsed, info) {
+    stopPlayback();
+    const frames = parsed.frames.map((f) => fitPixels(f.px, parsed.w, parsed.h));
+    const resized = parsed.w !== sprite.width || parsed.h !== sprite.height;
+    const label = info.label || 'Claude';
+    const animate = info.task === 'animate' || frames.length > 1;
+    if (!animate && info.place === 'replace') {
+      if (!canDraw()) return false;
+      begin(label);
+      sprite.cels.set(celKey(activeLayerId, currentFrame().id), frames[0]);
+      commit();
+    } else if (!animate && info.place === 'layer') {
+      begin(label);
+      const layer = makeLayer(uniqueLayerName('Claude'));
+      const art = activeLayer() && !activeLayer().guide ? activeLayerIndex() + 1 : sprite.layers.length;
+      sprite.layers.splice(art, 0, layer);
+      sprite.cels.set(celKey(layer.id, currentFrame().id), frames[0]);
+      activeLayerId = layer.id;
+      commit();
+    } else {
+      begin(label);
+      const layer = resultLayer();
+      activeLayerId = layer.id;
+      const tag = info.target === 'tag' ? sprite.tags.find((t) => t.id === info.tagId) : null;
+      const dur = (f) => clamp(Math.round(f.duration || info.duration || 100), 10, 10000);
+      if (tag) {
+        const refId = sprite.frames[tag.from].id;
+        frames.forEach((px, k) => {
+          let fi = tag.from + k;
+          if (fi > tag.to) {
+            const f = makeFrame(dur(parsed.frames[k]));
+            sprite.frames.splice(fi, 0, f);
+            tagsFrameInserted(fi - 1);
+            copyGuideCels(refId, f.id);
+          }
+          sprite.cels.set(celKey(layer.id, sprite.frames[fi].id), px);
+        });
+        frameIndex = tag.from;
+        activeTagId = tag.id;
+      } else {
+        const at = frameIndex;
+        const refId = currentFrame().id;
+        const count = frames.length;
+        for (const t of sprite.tags) {
+          if (t.from > at) {
+            t.from += count;
+            t.to += count;
+          } else if (t.to > at) t.to += count;
+        }
+        frames.forEach((px, k) => {
+          const f = makeFrame(dur(parsed.frames[k]));
+          sprite.frames.splice(at + 1 + k, 0, f);
+          copyGuideCels(refId, f.id);
+          sprite.cels.set(celKey(layer.id, f.id), px);
+        });
+        const nm = (info.tagName || '').trim();
+        if (nm && count > 0) {
+          const t = { id: uid('T'), name: uniqueTagName(nm.slice(0, 40)), from: at + 1, to: at + count, color: nextTagColor(), loop: info.loop !== false, pingpong: false };
+          sprite.tags.push(t);
+          sprite.tags.sort((a, b) => a.from - b.from || a.to - b.to);
+          activeTagId = t.id;
+        }
+        frameIndex = at + 1;
+      }
+      commit();
+    }
+    const where = animate ? `${frames.length} frame${frames.length > 1 ? 's' : ''}` : info.place === 'layer' ? 'a new layer' : 'the current layer';
+    toast(`Claude’s sprite was added to ${where}${resized ? ` (it was ${parsed.w}×${parsed.h}, placed into ${sprite.width}×${sprite.height})` : ''} — Undo removes it`, 'ok', 4500);
+    return true;
+  }
+
+  const CLAUDE_TASKS = [
+    ['draw', 'Draw'],
+    ['animate', 'Animate'],
+    ['edit', 'Edit'],
+    ['palette', 'Palette'],
+    ['review', 'Review'],
+  ];
+  const CLAUDE_IDEAS = {
+    draw: ['knight with a sword and shield', 'slime enemy', 'health potion', 'treasure chest', 'grass platform tile', 'wooden sign'],
+    animate: ['idle breathing loop', 'run cycle', 'walk cycle', 'jump', 'sword attack', 'hurt flinch', 'death / fade out', 'coin spin'],
+    edit: ['add a dark outline', 'make it face left', 'give it a red cape', 'add shading with a top-left light', 'make the colors more vibrant', 'clean up stray pixels'],
+    palette: ['lush forest', 'desert ruins', 'icy cave', 'cyberpunk city at night', 'spooky graveyard', 'Game Boy style'],
+    review: ['Is the silhouette readable?', 'How can I improve the shading?', 'Is the animation timing good?'],
+  };
+
+  function claudeDialog(task) {
+    stopPlayback();
+    task = CLAUDE_TASKS.some(([k]) => k === task) ? task : settings.claudeTask || 'draw';
+    const st = { task };
+    const prompt = el('textarea', { class: 'input claude-prompt', rows: 3, spellcheck: 'true' });
+    const ideas = el('div', { class: 'chips claude-ideas' });
+    const opts = el('div', { class: 'claude-opts' });
+    const place = selectInput([['layer', 'New layer'], ['replace', 'Replace current layer'], ['frame', 'New frame after this one']], settings.claudePlace);
+    const strict = checkInput('Use only colors from the current palette', settings.claudeStrict);
+    const curTag = tagAt(frameIndex);
+    const target = selectInput(curTag ? [['tag', `Fill tag “${curTag.name}” (${curTag.to - curTag.from + 1} frames)`], ['after', 'Insert new frames after this frame']] : [['after', 'Insert new frames after this frame']], curTag ? 'tag' : 'after');
+    const count = numInput(curTag ? curTag.to - curTag.from + 1 : 4, 1, 24);
+    const ms = numInput(curTag ? sprite.frames[curTag.from].duration : 100, 10, 2000, 10);
+    const tagName = textInput(curTag ? curTag.name : 'walk');
+    const loop = checkInput('Loops', curTag ? curTag.loop : true);
+    const palSize = selectInput([[8, '8 colors'], [16, '16 colors'], [24, '24 colors'], [32, '32 colors']], 16);
+    const model = selectInput(ClaudeAI.MODELS, settings.claudeModel);
+    const effort = selectInput([['low', 'Quick'], ['medium', 'Balanced'], ['high', 'Careful']], settings.claudeEffort);
+    const effortField = field('Effort', effort);
+    const sendBtn = el('button', { type: 'button', class: 'btn primary claude-send' });
+    const keyBtn = el('button', { type: 'button', class: 'btn', onclick: () => claudeKeyDialog(refreshSend) }, icon('key'), el('span', {}, 'API key'));
+    const status = el('div', { class: 'claude-status', role: 'status' });
+    const thinkingPre = el('pre', {});
+    const thinking = el('details', { class: 'claude-thinking', hidden: true }, el('summary', {}, 'Claude’s thinking'), thinkingPre);
+    const output = el('pre', { class: 'claude-output', hidden: true });
+    const reply = el('textarea', { class: 'input mono claude-reply', rows: 4, spellcheck: 'false', placeholder: 'Paste Claude’s whole reply here, then press Apply' });
+    const copyBtn = el('button', { type: 'button', class: 'btn' }, icon('copy'), el('span', {}, 'Copy prompt'));
+    const applyBtn = el('button', { type: 'button', class: 'btn' }, icon('check'), el('span', {}, 'Apply reply'));
+    const manual = el(
+      'details',
+      { class: 'claude-manual' },
+      el('summary', {}, 'No API key? Use claude.ai instead'),
+      el('ol', {}, el('li', {}, 'Press ', el('strong', {}, 'Copy prompt'), '.'), el('li', {}, 'Paste it into a new chat on ', el('a', { href: 'https://claude.ai/new', target: '_blank', rel: 'noopener' }, 'claude.ai'), '.'), el('li', {}, 'Copy Claude’s whole reply, paste it below and press ', el('strong', {}, 'Apply reply'), '.')),
+      el('div', { class: 'claude-manual-row' }, copyBtn, el('span', { class: 'grow' }), applyBtn),
+      reply
+    );
+    const seg = segmented(CLAUDE_TASKS, st.task, (v) => {
+      st.task = v;
+      delete manual.dataset.info;
+      settings.claudeTask = v;
+      persistSettings();
+      render();
+    });
+
+    function render() {
+      const t = st.task;
+      prompt.placeholder = {
+        draw: 'Describe the sprite, e.g. “a knight with a blue cape and a sword”',
+        animate: 'Describe the animation, e.g. “run cycle, arms swinging”',
+        edit: 'What should change? e.g. “add a dark outline and a red scarf”',
+        palette: 'Describe the mood or setting, e.g. “haunted swamp at dusk”',
+        review: 'Optional: ask something specific about the sprite',
+      }[t];
+      ideas.replaceChildren(...CLAUDE_IDEAS[t].map((s) => el('button', { type: 'button', class: 'chip', onclick: () => { prompt.value = s; prompt.focus(); } }, s)));
+      const kids = [];
+      if (t === 'draw' || t === 'edit') kids.push(row(field('Put the result in', place), el('div', { class: 'field' }, strict.node)));
+      if (t === 'animate') {
+        kids.push(field('Frames go to', target));
+        const showTag = target.value === 'after';
+        kids.push(row(field('Frames', count), field('ms per frame', ms), showTag ? field('Tag name', tagName) : null));
+        kids.push(el('div', { class: 'inline' }, showTag ? loop.node : null, strict.node));
+      }
+      if (t === 'palette') kids.push(field('Size', palSize));
+      if (t !== 'palette' && sprite.width * sprite.height > 64 * 64) {
+        kids.push(el('p', { class: 'field-hint warn-text' }, `Claude draws best on small sprites (up to about 64×64). At ${sprite.width}×${sprite.height} replies are slow and may come back incomplete.`));
+      }
+      opts.replaceChildren(...kids);
+      effortField.hidden = model.value.startsWith('claude-haiku');
+      refreshSend();
+    }
+    target.addEventListener('change', () => {
+      if (target.value === 'tag' && curTag) count.value = curTag.to - curTag.from + 1;
+      render();
+    });
+    model.addEventListener('change', () => {
+      settings.claudeModel = model.value;
+      persistSettings();
+      render();
+    });
+    effort.addEventListener('change', () => {
+      settings.claudeEffort = effort.value;
+      persistSettings();
+    });
+    place.addEventListener('change', () => {
+      settings.claudePlace = place.value;
+      persistSettings();
+    });
+    strict.input.addEventListener('change', () => {
+      settings.claudeStrict = strict.input.checked;
+      persistSettings();
+    });
+
+    function refreshSend() {
+      const has = !!claudeKey();
+      sendBtn.replaceChildren(icon(claudeState.busy ? 'x' : 'claude'), el('span', {}, claudeState.busy ? 'Stop' : has ? 'Send to Claude' : 'Add API key to send'));
+      sendBtn.classList.toggle('danger', claudeState.busy);
+      keyBtn.hidden = !has;
+    }
+
+    /** Builds the request for the current task; returns null (with a toast) when it can't. */
+    function buildRequest() {
+      const t = st.task;
+      const text = prompt.value.trim();
+      if (!text && t !== 'review') {
+        toast('Describe what you want first', 'warn');
+        prompt.focus();
+        return null;
+      }
+      const ctx = {
+        task: t,
+        prompt: text,
+        w: sprite.width,
+        h: sprite.height,
+        palette: palette.colors,
+        strictPalette: strict.input.checked,
+        context: claudeContext(),
+        images: [],
+      };
+      const info = { task: t, place: place.value, label: 'Claude: ' + CLAUDE_TASKS.find((x) => x[0] === t)[1] };
+      if (t === 'edit' || t === 'animate' || t === 'review') {
+        let list;
+        if (t === 'review') {
+          const tg = tagAt(frameIndex);
+          list = tg && tg.to > tg.from ? Array.from({ length: Math.min(8, tg.to - tg.from + 1) }, (_, k) => tg.from + k) : [frameIndex];
+          list = list.filter((i) => !isEmptyBuffer(compositePixels(i, true)));
+        } else if (t === 'animate' && target.value === 'tag' && curTag) {
+          const ref = firstNonEmptyFrame(curTag.from);
+          list = ref >= 0 ? [ref] : [];
+        } else {
+          const ref = firstNonEmptyFrame(frameIndex);
+          list = ref >= 0 ? [t === 'edit' ? frameIndex : ref] : [];
+          if (t === 'edit' && isEmptyBuffer(compositePixels(frameIndex, true))) list = [];
+        }
+        if (!list.length && t !== 'animate') {
+          toast(t === 'edit' ? 'This frame is empty — draw something (or use Draw) first' : 'Nothing to review yet — draw something first', 'warn', 3500);
+          return null;
+        }
+        if (list.length) {
+          ctx.reference = { frames: list.map((i) => compositePixels(i, true)) };
+          ctx.images = [framesImageB64(list)];
+          ctx.frameCount = list.length;
+        }
+      }
+      if (t === 'animate') {
+        ctx.frameCount = clamp(Math.round(+count.value) || 4, 1, 24);
+        ctx.duration = clamp(Math.round(+ms.value) || 100, 10, 2000);
+        ctx.tagName = target.value === 'tag' && curTag ? curTag.name : tagName.value.trim();
+        Object.assign(info, { target: target.value, tagId: curTag && curTag.id, tagName: target.value === 'after' ? tagName.value.trim() : '', loop: loop.input.checked, duration: ctx.duration });
+      }
+      if (t === 'palette') ctx.paletteSize = +palSize.value;
+      return { prompt: ClaudeAI.buildPrompt(ctx), info };
+    }
+
+    /** Applies a reply; returns [message, kind] for the status line. */
+    function handleReply(text, info) {
+      if (info.task === 'review') return ['', 'ok'];
+      if (info.task === 'palette') {
+        const colors = ClaudeAI.parsePalette(text);
+        if (colors.length < 2) return ['Couldn’t find colors in the reply.', 'error'];
+        setPalette('Claude: ' + (prompt.value.trim().slice(0, 28) || 'palette'), colors);
+        toast(`Palette with ${colors.length} colors applied`, 'ok');
+        return [`Palette applied — ${colors.length} colors.`, 'ok'];
+      }
+      let parsed;
+      try {
+        parsed = ClaudeAI.parse(text);
+      } catch (err) {
+        return ['Couldn’t read a sprite from the reply: ' + err.message, 'error'];
+      }
+      if (!applySpriteResult(parsed, info)) return ['Nothing was applied.', 'warn'];
+      const msg = `Applied ${parsed.frames.length} frame${parsed.frames.length > 1 ? 's' : ''} (${parsed.w}×${parsed.h}).` + (parsed.warnings.length ? ' ' + parsed.warnings.join(' ') : '');
+      return [msg, parsed.warnings.length ? 'warn' : 'ok'];
+    }
+
+    function setStatus(msg, kind = '') {
+      status.className = 'claude-status ' + kind;
+      status.textContent = msg;
+    }
+
+    async function send() {
+      if (claudeState.busy) {
+        if (claudeState.abort) claudeState.abort.abort();
+        return;
+      }
+      const key = claudeKey();
+      if (!key) {
+        claudeKeyDialog(refreshSend);
+        return;
+      }
+      const req = buildRequest();
+      if (!req) return;
+      claudeState.busy = true;
+      claudeState.abort = new AbortController();
+      refreshSend();
+      output.hidden = false;
+      output.textContent = '';
+      thinkingPre.textContent = '';
+      thinking.hidden = true;
+      const started = performance.now();
+      const tick = setInterval(() => setStatus(`${output.textContent ? 'Writing' : 'Thinking'}… ${((performance.now() - started) / 1000).toFixed(0)}s`, 'busy'), 500);
+      setStatus('Connecting…', 'busy');
+      try {
+        const res = await ClaudeAI.run({
+          apiKey: key,
+          model: model.value,
+          effort: effort.value,
+          prompt: req.prompt,
+          signal: claudeState.abort.signal,
+          onText: (d) => {
+            output.textContent += d;
+            output.scrollTop = output.scrollHeight;
+          },
+          onThinking: (d) => {
+            thinking.hidden = false;
+            thinkingPre.textContent += d;
+          },
+        });
+        clearInterval(tick);
+        output.textContent = res.text;
+        const done = `Done in ${((performance.now() - started) / 1000).toFixed(1)}s · ${res.usage.input_tokens} in / ${res.usage.output_tokens} out tokens.`;
+        const [msg, kind] = handleReply(res.text, req.info);
+        const cut = res.stopReason === 'max_tokens' ? ' The reply hit the length limit and may be cut off.' : '';
+        setStatus(`${done} ${msg}${cut}`.trim(), cut ? 'warn' : kind);
+      } catch (err) {
+        clearInterval(tick);
+        setStatus(err.message, err.message === 'Cancelled' ? '' : 'error');
+      } finally {
+        claudeState.busy = false;
+        claudeState.abort = null;
+        refreshSend();
+      }
+    }
+
+    sendBtn.addEventListener('click', send);
+    copyBtn.addEventListener('click', async () => {
+      const req = buildRequest();
+      if (!req) return;
+      const text = ClaudeAI.manualPrompt(req.prompt);
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('Prompt copied — paste it into claude.ai', 'ok');
+      } catch (_) {
+        output.hidden = false;
+        output.textContent = text;
+        toast('Couldn’t copy automatically — select the prompt below and copy it', 'warn', 4000);
+      }
+      manual.dataset.info = JSON.stringify(req.info);
+    });
+    applyBtn.addEventListener('click', () => {
+      const text = reply.value.trim();
+      if (!text) {
+        toast('Paste Claude’s reply first', 'warn');
+        return;
+      }
+      const req = manual.dataset.info ? { info: JSON.parse(manual.dataset.info) } : buildRequest();
+      if (!req) return;
+      if (req.info.task === 'review') {
+        output.hidden = false;
+        output.textContent = text;
+        return;
+      }
+      setStatus(...handleReply(text, req.info));
+    });
+    prompt.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        send();
+      }
+    });
+
+    render();
+    openModal({
+      title: 'Claude Assistant',
+      width: 620,
+      onCancel: () => {
+        if (claudeState.abort) claudeState.abort.abort();
+      },
+      body: el(
+        'div',
+        { class: 'claude-dialog' },
+        seg.node,
+        prompt,
+        ideas,
+        opts,
+        el('div', { class: 'claude-send-row' }, field('Model', model), effortField, el('span', { class: 'grow' }), keyBtn, sendBtn),
+        status,
+        thinking,
+        output,
+        manual
+      ),
+      buttons: [{ label: 'Close', cancel: true }],
+    });
+    requestAnimationFrame(() => prompt.focus());
+  }
+
+  async function copySpriteText() {
+    const text = ClaudeAI.encode({ w: sprite.width, h: sprite.height, frames: [{ px: compositePixels(frameIndex, true), duration: currentFrame().duration }], palette: palette.colors });
+    try {
+      await navigator.clipboard.writeText('```sprite\n' + text + '\n```');
+      toast('Frame copied as sprite text — paste it into a chat with Claude', 'ok');
+    } catch (_) {
+      toast('Clipboard access was blocked by the browser', 'error');
+    }
+  }
+
+  function importSpriteTextDialog() {
+    const ta = el('textarea', { class: 'input mono claude-reply', rows: 10, spellcheck: 'false', placeholder: 'size 16x16\npalette\n. transparent\nk #1a1c2c\nframe 1\n................' });
+    const place = selectInput([['layer', 'New layer'], ['replace', 'Replace current layer'], ['frame', 'New frame(s) after this one']], 'layer');
+    openModal({
+      title: 'Import Sprite Text',
+      width: 560,
+      body: el('div', {}, el('p', { class: 'muted small' }, 'Paste sprite text (for example a reply from Claude). Several frames are added as new frames.'), ta, field('Put the result in', place)),
+      buttons: [
+        { label: 'Cancel', cancel: true },
+        {
+          label: 'Import',
+          kind: 'primary',
+          onClick: (m) => {
+            let parsed;
+            try {
+              parsed = ClaudeAI.parse(ta.value);
+            } catch (err) {
+              toast(err.message, 'error', 4000);
+              return;
+            }
+            m.close();
+            applySpriteResult(parsed, { task: place.value === 'frame' ? 'animate' : 'draw', place: place.value, target: 'after', label: 'Import Sprite Text' });
+            if (parsed.warnings.length) toast(parsed.warnings.join(' '), 'warn', 5000);
+          },
+        },
+      ],
+    });
   }
 
   // ===========================================================================
@@ -4224,6 +5754,8 @@
       updateCursor();
     });
     new ResizeObserver(resizeView).observe(dom.workspace);
+    const relayoutTags = debounce(layoutTags, 60);
+    new ResizeObserver(() => relayoutTags()).observe(dom.frames);
     narrowQuery.addEventListener('change', () => {
       document.body.classList.remove('panels-open');
       applyLayout();
@@ -4511,7 +6043,8 @@
     syncPicker();
     refreshAll();
     dom.stSave.textContent = restored ? 'Restored from browser' : '';
-    toast(restored ? 'Welcome back — your last session was restored' : 'Tip: press ? to see all keyboard shortcuts', 'info', 3500);
+    if (restored) toast('Welcome back — your last session was restored', 'info', 3500);
+    else newSpriteDialog('character');
   }
 
   // Small debugging / scripting surface.
@@ -4544,9 +6077,26 @@
       const cel = getCel(layerId, sprite.frames[fi].id);
       return Color.toHex(cel ? cel[y * sprite.width + x] : 0);
     },
-    composite: (fi = frameIndex) => compositePixels(fi),
+    composite: (fi = frameIndex, final = false) => compositePixels(fi, final),
     serialize: () => serialize(),
     encodeGif: (opts) => GifEncoder.encode(opts),
+    get activeTagId() {
+      return activeTagId;
+    },
+    get playing() {
+      return playing;
+    },
+    fromTemplate(id, name = id) {
+      const t = TEMPLATES.find((x) => x.id === id);
+      loadTemplateSprite(t, spriteFromTemplate(t, name, t.ppu || settings.unityPPU));
+    },
+    setFrame,
+    selectTag,
+    saveTag,
+    setPivot,
+    unityPlan: (o) => planUnityExport(o),
+    unityZip: (o) => buildUnityZip(o),
+    applySprite: (text, info) => applySpriteResult(ClaudeAI.parse(text), info),
   };
 
   init();
