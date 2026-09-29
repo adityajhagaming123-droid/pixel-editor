@@ -1,142 +1,203 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Advanced Pixel Art & Animation Editor</title>
-    <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pixeledit — Pixel Art &amp; Animation Studio</title>
+  <meta name="description" content="A fast, feature-rich pixel art and sprite animation editor that runs in your browser: layers, blend modes, onion skinning, dithering, symmetry, palettes and GIF export.">
+  <meta name="theme-color" content="#15161c">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Crect width='8' height='8' fill='%2315161c'/%3E%3Cpath fill='%236c8cff' d='M1 1h4v1H1zM1 2h1v5H1zM5 2h1v2H5zM2 4h3v1H2z'/%3E%3Cpath fill='%23ff5c7a' d='M5 5h2v2H5z'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="app-container">
-        <!-- Left Sidebar Toolbar -->
-        <aside class="sidebar">
-            <h1 class="logo">Pixeledit</h1>
-            
-            <!-- Core Tools -->
-            <div class="tool-section">
-                <h3>Tools</h3>
-                <div class="tool-grid">
-                    <button id="btn-pencil" class="tool-btn active" title="Pencil (P)">✏️</button>
-                    <button id="btn-select" class="tool-btn" title="Select Tool (M)">🔲</button>
-                    <button id="btn-eraser" class="tool-btn" title="Eraser (E)">🧽</button>
-                    <button id="btn-bucket" class="tool-btn" title="Fill Bucket (F)">🪣</button>
-                    <button id="btn-line" class="tool-btn" title="Line Tool (L)">📏</button>
-                    <button id="btn-rect" class="tool-btn" title="Rectangle Tool (R)">⬜</button>
-                    <button id="btn-oval" class="tool-btn" title="Oval Tool (O)">⭕</button>
-                    <button id="btn-clear" class="tool-btn" title="Clear Active Layer">🗑️</button>
-                </div>
-            </div>
+  <div class="app" id="app">
+    <!-- Menu bar -->
+    <header class="menubar">
+      <div class="brand"><span class="brand-logo" aria-hidden="true"></span><span class="brand-name">Pixeledit</span></div>
+      <button class="icon-btn menu-all" id="menu-all" aria-label="Menu" aria-haspopup="true"><i data-icon="menu"></i></button>
+      <nav class="menus" id="menus" aria-label="Main menu"></nav>
+      <div class="doc-name-wrap">
+        <input id="doc-name" class="doc-name" spellcheck="false" aria-label="Sprite name" title="Sprite name — click to rename">
+      </div>
+      <div class="menubar-actions">
+        <button class="icon-btn" data-cmd="undo" aria-label="Undo"><i data-icon="undo"></i></button>
+        <button class="icon-btn" data-cmd="redo" aria-label="Redo"><i data-icon="redo"></i></button>
+        <span class="vsep"></span>
+        <button class="btn btn-accent" data-cmd="exportPng" title="Export PNG, spritesheet or GIF (Ctrl+E)"><i data-icon="download"></i><span class="hide-sm">Export</span></button>
+        <button class="icon-btn" data-cmd="togglePanels" aria-label="Toggle side panels"><i data-icon="panel"></i></button>
+      </div>
+    </header>
 
-            <!-- Brush Setup -->
-            <div class="tool-section">
-                <h3>Brush Size</h3>
-                <select id="brush-size">
-                    <option value="1" selected>1px (Thin)</option>
-                    <option value="2">2px</option>
-                    <option value="3">3px</option>
-                    <option value="4">4px (Thick)</option>
-                </select>
-            </div>
+    <!-- Contextual tool options -->
+    <div class="optionsbar" id="optionsbar"></div>
 
-            <!-- Layer Manager -->
-            <div class="tool-section">
-                <h3>Layers</h3>
-                <div class="layer-controls">
-                    <button id="btn-add-layer" title="New Layer">➕ Add Layer</button>
-                    <button id="btn-delete-layer" title="Delete Active Layer">❌ Delete</button>
-                </div>
-                <div class="layer-list" id="layer-list">
-                    <!-- Populated dynamically by JS -->
-                </div>
-            </div>
+    <div class="main">
+      <!-- Tools -->
+      <nav class="toolbar" id="toolbar" aria-label="Tools"></nav>
 
-            <!-- Color Palette Panel -->
-            <div class="tool-section">
-                <h3>Colors</h3>
-                <input type="color" id="color-picker" value="#000000">
-                <div class="palette" id="palette">
-                    <div class="color-swatch active" style="background-color: #000000;"></div>
-                    <div class="color-swatch" style="background-color: #ffffff;"></div>
-                    <div class="color-swatch" style="background-color: #d95763;"></div>
-                    <div class="color-swatch" style="background-color: #99e550;"></div>
-                    <div class="color-swatch" style="background-color: #5b6ee1;"></div>
-                    <div class="color-swatch" style="background-color: #fbf236;"></div>
-                    <div class="color-swatch" style="background-color: #df7126;"></div>
-                    <div class="color-swatch" style="background-color: #5fcde4;"></div>
-                </div>
-            </div>
+      <!-- Canvas -->
+      <section class="workspace" id="workspace">
+        <canvas id="view" class="view" aria-label="Drawing canvas"></canvas>
+        <div class="zoom-hud">
+          <button class="icon-btn sm" data-cmd="zoomOut" aria-label="Zoom out"><i data-icon="minus"></i></button>
+          <button class="zoom-label" id="zoom-label" data-cmd="zoomFit" title="Fit to screen (0)">100%</button>
+          <button class="icon-btn sm" data-cmd="zoomIn" aria-label="Zoom in"><i data-icon="plus"></i></button>
+          <span class="vsep"></span>
+          <button class="icon-btn sm" data-cmd="toggleGrid" aria-label="Toggle pixel grid"><i data-icon="grid"></i></button>
+          <button class="icon-btn sm" data-cmd="toggleTimeline" aria-label="Toggle timeline"><i data-icon="timeline"></i></button>
+        </div>
+      </section>
 
-            <!-- Image Adjustments FX Panel -->
-            <div class="tool-section adjustment-panel">
-                <h3>FX Adjustments</h3>
-                <div class="slider-group">
-                    <label>Brightness: <span id="val-brightness">100%</span></label>
-                    <input type="range" id="slider-brightness" min="0" max="200" value="100">
-                </div>
-                <div class="slider-group">
-                    <label>Contrast: <span id="val-contrast">100%</span></label>
-                    <input type="range" id="slider-contrast" min="0" max="200" value="100">
-                </div>
-                <div class="slider-group">
-                    <label>Saturation: <span id="val-saturation">100%</span></label>
-                    <input type="range" id="slider-saturation" min="0" max="200" value="100">
-                </div>
-                <div class="slider-group">
-                    <label>Vibrance: <span id="val-vibrance">0%</span></label>
-                    <input type="range" id="slider-vibrance" min="-100" max="100" value="0">
-                </div>
-                <button id="btn-apply-filters" class="apply-btn">✨ Apply to Layer</button>
+      <!-- Side panels -->
+      <aside class="sidepanel" id="sidepanel" aria-label="Panels">
+        <section class="panel" data-panel="color">
+          <button class="panel-head"><span>Color</span><i data-icon="chevronDown" class="chev"></i></button>
+          <div class="panel-body">
+            <div class="color-head">
+              <div class="color-pair">
+                <button class="big-swatch" id="sw-primary" title="Primary color — left click. Click to edit."><span></span></button>
+                <button class="big-swatch secondary" id="sw-secondary" title="Secondary color — right click. Click to edit."><span></span></button>
+              </div>
+              <div class="color-head-actions">
+                <button class="icon-btn sm" data-cmd="swapColors" aria-label="Swap colors"><i data-icon="swap"></i></button>
+                <button class="icon-btn sm" data-cmd="resetColors" aria-label="Reset colors"><i data-icon="reset"></i></button>
+              </div>
+              <input id="hex-input" class="hex-input" spellcheck="false" maxlength="11" aria-label="Hex color">
             </div>
+            <div class="sv" id="sv"><div class="sv-thumb" id="sv-thumb"></div></div>
+            <div class="hue-bar" id="hue-bar" aria-label="Hue"><div class="bar-thumb" id="hue-thumb"></div></div>
+            <div class="alpha-bar" id="alpha-bar" aria-label="Opacity"><div class="alpha-fill" id="alpha-fill"></div><div class="bar-thumb" id="alpha-thumb"></div></div>
+            <div class="rgba-row">
+              <label>R<input type="number" id="in-r" min="0" max="255"></label>
+              <label>G<input type="number" id="in-g" min="0" max="255"></label>
+              <label>B<input type="number" id="in-b" min="0" max="255"></label>
+              <label>A<input type="number" id="in-a" min="0" max="255"></label>
+            </div>
+            <div class="sub-label">Recent</div>
+            <div class="recent" id="recent-colors"></div>
+          </div>
+        </section>
 
-            <!-- Canvas Settings -->
-            <div class="tool-section">
-                <h3>Settings</h3>
-                <label for="grid-size">Canvas Size:</label>
-                <select id="grid-size">
-                    <option value="16">16 x 16</option>
-                    <option value="32" selected>32 x 32</option>
-                    <option value="64">64 x 64</option>
-                </select>
-                <button id="btn-toggle-grid" class="tool-btn" style="width: 100%; font-size: 14px; margin-bottom: 10px; padding: 8px;">🌐 Hide Grid</button>
-                <button id="btn-export" class="export-btn">💾 Export Current Frame</button>
+        <section class="panel" data-panel="palette">
+          <button class="panel-head"><span>Palette</span><i data-icon="chevronDown" class="chev"></i></button>
+          <div class="panel-body">
+            <select id="palette-select" class="input sm" aria-label="Palette preset"></select>
+            <div class="palette-grid" id="palette-grid"></div>
+            <div class="panel-actions">
+              <button class="icon-btn sm" id="pal-add" title="Add primary color to the palette"><i data-icon="plus"></i></button>
+              <button class="icon-btn sm" id="pal-remove" title="Remove the selected swatch"><i data-icon="minus"></i></button>
+              <button class="icon-btn sm" id="pal-extract" title="Build a palette from the colors used in the sprite"><i data-icon="pipette"></i></button>
+              <button class="icon-btn sm" id="pal-sort" title="Sort by hue and lightness"><i data-icon="sort"></i></button>
+              <span class="grow"></span>
+              <button class="icon-btn sm" id="pal-import" title="Import palette (.hex, .gpl, .txt or image)"><i data-icon="upload"></i></button>
+              <button class="icon-btn sm" id="pal-export" title="Export palette (.hex)"><i data-icon="download"></i></button>
             </div>
-        </aside>
+          </div>
+        </section>
 
-        <!-- Main Workspace -->
-        <main class="workspace">
-            <div class="canvas-wrapper" id="canvas-wrapper">
-                <div class="canvas-container">
-                    <div id="onion-canvas" style="display: none;"></div>
-                    <div id="pixel-canvas"></div>
-                    <!-- MARQUEE OVERLAY FOR SELECT TOOL -->
-                    <div id="selection-marquee"></div>
-                </div>
+        <section class="panel" data-panel="layers">
+          <button class="panel-head"><span>Layers</span><i data-icon="chevronDown" class="chev"></i></button>
+          <div class="panel-body">
+            <div class="layer-props">
+              <span class="mini-label">Opacity</span>
+              <input type="range" class="range" id="layer-opacity" min="0" max="100" value="100" aria-label="Layer opacity">
+              <span class="mini-val" id="layer-opacity-val">100%</span>
+              <select id="layer-blend" class="input sm" aria-label="Blend mode"></select>
             </div>
-            
-            <!-- ANIMATION TIMELINE -->
-            <div class="timeline-panel">
-                <div class="timeline-header">
-                    <div class="timeline-controls">
-                        <button id="btn-play" class="tool-btn">▶️ Play</button>
-                        <label>FPS: <input type="number" id="fps-input" value="8" min="1" max="60" style="width: 50px; background: var(--bg-dark); color: white; border: 1px solid var(--border-color);"></label>
-                        <button id="btn-onion" class="tool-btn">🧅 Onion: OFF</button>
-                    </div>
-                    <div class="timeline-controls">
-                        <button id="btn-add-frame" class="tool-btn" style="font-size: 14px;">➕ New Frame</button>
-                        <button id="btn-dup-frame" class="tool-btn" style="font-size: 14px;">📄 Duplicate</button>
-                        <button id="btn-del-frame" class="tool-btn" style="font-size: 14px;">🗑️ Delete</button>
-                        <button id="btn-export-spritesheet" class="export-btn" style="width: auto;">🎞️ Export Spritesheet</button>
-                    </div>
-                </div>
-                <div class="frame-list" id="frame-list">
-                    <!-- Populated dynamically -->
-                </div>
+            <div class="layer-list" id="layer-list"></div>
+            <div class="panel-actions">
+              <button class="icon-btn sm" data-cmd="newLayer" aria-label="New layer"><i data-icon="plus"></i></button>
+              <button class="icon-btn sm" data-cmd="duplicateLayer" aria-label="Duplicate layer"><i data-icon="copy"></i></button>
+              <button class="icon-btn sm" data-cmd="mergeDown" aria-label="Merge down"><i data-icon="merge"></i></button>
+              <button class="icon-btn sm" data-cmd="layerUp" aria-label="Move layer up"><i data-icon="chevronUp"></i></button>
+              <button class="icon-btn sm" data-cmd="layerDown" aria-label="Move layer down"><i data-icon="chevronDown"></i></button>
+              <span class="grow"></span>
+              <button class="icon-btn sm danger" data-cmd="deleteLayer" aria-label="Delete layer"><i data-icon="trash"></i></button>
             </div>
-        </main>
+          </div>
+        </section>
+
+        <section class="panel" data-panel="preview">
+          <button class="panel-head"><span>Preview</span><i data-icon="chevronDown" class="chev"></i></button>
+          <div class="panel-body">
+            <div class="preview-wrap"><canvas id="preview-canvas"></canvas></div>
+            <div class="panel-actions">
+              <button class="icon-btn sm" id="preview-play" title="Play the animation in the preview only"><i data-icon="play"></i></button>
+              <span class="preview-info" id="preview-info"></span>
+              <span class="grow"></span>
+              <select id="preview-scale" class="input sm" aria-label="Preview scale">
+                <option value="0">Fit</option>
+                <option value="1">1×</option>
+                <option value="2">2×</option>
+                <option value="4">4×</option>
+              </select>
+            </div>
+          </div>
+        </section>
+      </aside>
     </div>
 
-    <!-- Hidden native element for compiling clean exports -->
-    <canvas id="export-canvas" style="display: none;"></canvas>
-    <script src="script.js"></script>
+    <!-- Timeline -->
+    <footer class="timeline" id="timeline">
+      <div class="timeline-bar">
+        <div class="tl-group">
+          <button class="icon-btn" data-cmd="firstFrame" aria-label="First frame"><i data-icon="skipBack"></i></button>
+          <button class="icon-btn" data-cmd="prevFrame" aria-label="Previous frame"><i data-icon="chevronLeft"></i></button>
+          <button class="icon-btn play-btn" id="btn-play" data-cmd="play" aria-label="Play or pause"><i data-icon="play"></i></button>
+          <button class="icon-btn" data-cmd="nextFrame" aria-label="Next frame"><i data-icon="chevronRight"></i></button>
+          <button class="icon-btn" data-cmd="lastFrame" aria-label="Last frame"><i data-icon="skipForward"></i></button>
+        </div>
+        <div class="tl-group">
+          <span class="tl-counter" id="frame-counter">1 / 1</span>
+          <label class="tl-field" title="Duration of the current frame">
+            <input type="number" id="frame-duration" class="input sm" min="10" max="10000" step="10" aria-label="Frame duration in milliseconds"><span>ms</span>
+          </label>
+          <select id="loop-mode" class="input sm" aria-label="Loop mode">
+            <option value="loop">Loop</option>
+            <option value="pingpong">Ping-pong</option>
+          </select>
+        </div>
+        <div class="tl-group">
+          <button class="btn toggle" id="btn-onion" data-cmd="toggleOnion"><i data-icon="layers"></i><span>Onion skin</span></button>
+          <button class="icon-btn" id="btn-onion-settings" title="Onion skin settings" aria-label="Onion skin settings"><i data-icon="settings"></i></button>
+        </div>
+        <div class="tl-group tl-right">
+          <button class="icon-btn" data-cmd="newFrame" aria-label="New frame"><i data-icon="plus"></i></button>
+          <button class="icon-btn" data-cmd="duplicateFrame" aria-label="Duplicate frame"><i data-icon="copy"></i></button>
+          <button class="icon-btn" data-cmd="frameLeft" aria-label="Move frame left"><i data-icon="arrowLeft"></i></button>
+          <button class="icon-btn" data-cmd="frameRight" aria-label="Move frame right"><i data-icon="arrowRight"></i></button>
+          <button class="icon-btn danger" data-cmd="deleteFrame" aria-label="Delete frame"><i data-icon="trash"></i></button>
+        </div>
+      </div>
+      <div class="frames" id="frames"></div>
+    </footer>
+
+    <!-- Status bar -->
+    <div class="statusbar">
+      <span class="st-hint" id="st-hint"></span>
+      <span class="st-spacer"></span>
+      <span id="st-pos" class="st-item mono">–</span>
+      <span id="st-color" class="st-item st-color mono" hidden><i class="chip"></i><span></span></span>
+      <span id="st-sel" class="st-item mono" hidden></span>
+      <span id="st-size" class="st-item mono"></span>
+      <span id="st-save" class="st-item st-save"></span>
+    </div>
+  </div>
+
+  <div id="dropdown-root"></div>
+  <div id="modal-root"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="drop-overlay" class="drop-overlay"><div class="drop-card"><i data-icon="upload"></i><span>Drop an image or a .pxl project</span></div></div>
+  <input type="file" id="file-open" accept=".pxl,.json,image/*" hidden>
+  <input type="file" id="file-palette" accept=".hex,.gpl,.txt,image/*" hidden>
+
+  <script src="js/util.js"></script>
+  <script src="js/palettes.js"></script>
+  <script src="js/gif.js"></script>
+  <script src="js/icons.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>
